@@ -14,7 +14,7 @@ This is the Rust implementation of the Python library for controlling GPIO pins 
 ## Example
 
 ```rust
-use jetsongpio::{GPIO, Direction, Level, Mode};
+use jetsongpio::{GPIO, Level, Mode, gpio::Direction};
 use std::thread;
 use std::time::Duration;
 
