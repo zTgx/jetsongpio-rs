@@ -19,7 +19,7 @@ const GPIOHANDLE_REQUEST_OUTPUT: u32 = 0x2;
 /// GPIO pin 7 to HIGH and GPIO pin 11 to LOW:
 ///
 /// ```rust
-/// use jetson_gpio::{GPIO, Level, Direction, Mode};
+/// use jetsongpio::{GPIO, Level, Direction, Mode};
 ///
 /// let mut gpio = GPIO::new();
 /// gpio.setmode(Mode::BOARD).unwrap();
@@ -46,7 +46,7 @@ pub enum Level {
 /// set up GPIO pin 7 as an output:
 ///
 /// ```rust
-/// use jetson_gpio::{GPIO, Direction};
+/// use jetsongpio::{GPIO, Direction};
 ///
 /// let mut gpio = GPIO::new();
 ///
@@ -151,7 +151,7 @@ fn check_write_access() -> Result<(), Error> {
 /// # Example
 ///
 /// ```rust
-/// use jetson_gpio::GPIO;
+/// use jetsongpio::GPIO;
 ///
 /// let gpio = GPIO::new();
 /// ```
@@ -377,18 +377,18 @@ impl GPIO {
         Ok(())
     }
 
-    fn setup_single_out(&mut self, ch_info: ChannelInfo, initial: Option<Level>) {
+    fn setup_single_out(&mut self, ch_info: ChannelInfo, initial: Option<Level>, consumer: &str) {
         let initial_value = initial.map(|l| l as u8);
         self.do_one_channel(
             ch_info,
             Direction::OUT.to_cdev(),
             initial_value,
-            "jetsongpio-rs",
+            consumer,
         );
     }
 
-    fn setup_single_in(&mut self, ch_info: ChannelInfo) {
-        self.do_one_channel(ch_info, Direction::IN.to_cdev(), None, "jetsongpio-rs");
+    fn setup_single_in(&mut self, ch_info: ChannelInfo, consumer: &str) {
+        self.do_one_channel(ch_info, Direction::IN.to_cdev(), None, consumer);
     }
 
     /// Setup a channel or list of channels with a direction and (optional) pull/up down control and (optional) initial value.
@@ -398,21 +398,23 @@ impl GPIO {
     /// * `channels` - A list of channels to setup.
     /// * `direction` - `Direction::IN` or `Direction::OUT`
     /// * `initial` - An optional initial level for an output channel.
+    /// * `consumer` - An optional consumer label for the GPIO line (default: "jetsongpio-rs").
     ///
     /// # Example
     ///
     /// ```rust
-    /// use jetson_gpio::{GPIO, Direction, Mode};
+    /// use jetsongpio::{GPIO, Direction, Mode};
     ///
     /// let mut gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();
-    /// gpio.setup(vec![7], Direction::OUT, None).unwrap();
+    /// gpio.setup(vec![7], Direction::OUT, None, None).unwrap();
     /// ```
     pub fn setup(
         &mut self,
         channels: Vec<u32>,
         direction: Direction,
         initial: Option<Level>,
+        consumer: Option<&str>,
     ) -> Result<(), Error> {
         check_write_access()?;
 
@@ -422,6 +424,8 @@ impl GPIO {
         if !direction.is_valid() {
             return Err(Error::msg("An invalid direction was passed to setup()"));
         }
+
+        let consumer = consumer.unwrap_or("jetsongpio-rs");
 
         // Clone needed data before mutating self
         let ch_infos_owned: Vec<ChannelInfo> = ch_infos.iter().map(|&ch| ch.clone()).collect();
@@ -436,7 +440,7 @@ impl GPIO {
         match direction {
             Direction::OUT => {
                 for ch_info in ch_infos_owned {
-                    self.setup_single_out(ch_info, initial);
+                    self.setup_single_out(ch_info, initial, consumer);
                 }
             }
             Direction::IN => {
@@ -444,7 +448,7 @@ impl GPIO {
                     return Err(Error::msg("initial parameter is not valid for inputs"));
                 }
                 for ch_info in ch_infos_owned {
-                    self.setup_single_in(ch_info);
+                    self.setup_single_in(ch_info, consumer);
                 }
             }
             _ => {
@@ -533,7 +537,7 @@ impl GPIO {
     ///
     /// # Example
     /// ```rust
-    /// use jetson_gpio::{GPIO, Direction, Level, Mode};
+    /// use jetsongpio::{GPIO, Direction, Level, Mode};
     ///
     /// let mut gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();

@@ -11,7 +11,7 @@ fn main() {
     gpio.setmode(Mode::BOARD).unwrap();
 
     // Setup PIN as output with initial LOW value
-    gpio.setup(vec![PIN], Direction::OUT, Some(Level::LOW))
+    gpio.setup(vec![PIN], Direction::OUT, Some(Level::LOW), None)
         .unwrap();
     println!("PIN {} set to output mode", PIN);
 

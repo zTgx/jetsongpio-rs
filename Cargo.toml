@@ -6,6 +6,10 @@ description = "A Rust library for controlling GPIO pins on NVIDIA Jetson devices
 license = "MIT"
 repository = "https://github.com/ztgx/jetsongpio-rs"
 
+[[bin]]
+name = "pinmux_lookup"
+path = "bin/pinmux_lookup.rs"
+
 [dependencies]
 anyhow = "1.0"
 libc = "0.2"

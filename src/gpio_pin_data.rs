@@ -3033,7 +3033,7 @@ pub fn get_data() -> (String, JetsonInfo, HashMap<Mode, HashMap<u32, ChannelInfo
     (model, jetson_info, all_modes)
 }
 
-fn get_jetson_data(model: &str) -> (Vec<GpioPin>, JetsonInfo) {
+pub fn get_jetson_data(model: &str) -> (Vec<GpioPin>, JetsonInfo) {
     match model {
         JETSON_ORIN_NX | JETSON_ORIN_NANO => (
             get_jetson_orin_nx_pin_defs(),
