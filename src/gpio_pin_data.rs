@@ -3271,58 +3271,9 @@ pub(crate) fn get_data() -> (
     let pin_defs: Vec<PinDefinition> = get_pin_defs(model.as_str()).unwrap();
     let jetson_info: JetsonInfo = get_jetson_info(model.as_str()).unwrap();
 
-    let mut gpio_chip_dirs: HashMap<String, String> = HashMap::new();
-    let mut gpio_chip_base: HashMap<String, u32> = HashMap::new();
-    let mut gpio_chip_ngpio: HashMap<String, u32> = HashMap::new();
     let mut pwm_dirs: HashMap<String, String> = HashMap::new();
 
-    let sysfs_prefixes = ["/sys/devices/", "/sys/devices/platform/"];
-
-    // create an array of unique chip_sysfs values from the pin definitions
-    let mut gpio_chip_names: Vec<String> = Vec::new();
-    for pin_def in pin_defs.iter() {
-        if !gpio_chip_names.contains(&pin_def.chip_sysfs) && !pin_def.chip_sysfs.is_empty() {
-            gpio_chip_names.push(pin_def.chip_sysfs.clone());
-        }
-    }
-
-    // find out the gpio sysdir, base, and ngpio values for each chip
-    for gpio_chip_name in gpio_chip_names.iter() {
-        let mut gpio_chip_dir: String = String::from("");
-        for sysfs_prefix in sysfs_prefixes.iter() {
-            let d = format!("{}{}", sysfs_prefix, gpio_chip_name);
-            if Path::new(&d).exists() {
-                gpio_chip_dir = d;
-                break;
-            }
-        }
-
-        if gpio_chip_dir == "" {
-            // anyhow::bail!("Cannot find GPIO chip {}", gpio_chip_name);
-        }
-
-        gpio_chip_dirs.insert(gpio_chip_name.clone(), gpio_chip_dir.clone());
-        let gpio_chip_gpio_dir = gpio_chip_dir + "/gpio";
-        // for each file in the directory
-        for entry in fs::read_dir(&gpio_chip_gpio_dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let file_name = path.file_name().unwrap().to_str().unwrap();
-            // check if the file name starts with "gpiochip"
-            if !file_name.starts_with("gpiochip") {
-                continue;
-            }
-            let base_fn = format!("{}/{}/base", gpio_chip_gpio_dir, file_name);
-            let base = string_to_uint(read_file_to_string(&base_fn));
-            gpio_chip_base.insert(gpio_chip_name.clone(), base);
-
-            let ngpio_fn = format!("{}/{}/ngpio", gpio_chip_gpio_dir, file_name);
-            let ngpio = string_to_uint(read_file_to_string(&ngpio_fn));
-            gpio_chip_ngpio.insert(gpio_chip_name.clone(), ngpio);
-
-            break;
-        }
-    }
+    let sysfs_prefixes = ["/sys/devices/", "/sys/devices/platform/", "/sys/bus/platform/devices/"];
 
     let mut pwm_chip_names: Vec<String> = Vec::new();
     for pin_def in pin_defs.iter() {
@@ -3377,11 +3328,9 @@ pub(crate) fn get_data() -> (
     let mut board_data: HashMap<u32, ChannelInfo> = HashMap::new();
     let mut bcm_data: HashMap<u32, ChannelInfo> = HashMap::new();
     for pin_def in pin_defs.iter() {
-        let ngpio = gpio_chip_ngpio.get(&pin_def.chip_sysfs).unwrap();
-        let chip_relative_id = pin_def.gpio.get(ngpio).unwrap();
-        let gpio = gpio_chip_base.get(&pin_def.chip_sysfs).unwrap() + chip_relative_id;
-        let default_gpio_name = format!("gpio{}", gpio);
-        let gpio_name = pin_def.name.get(ngpio).unwrap_or(&default_gpio_name);
+        // Get first (default) entry from gpio and name HashMaps
+        let line_offset = pin_def.gpio.values().next().copied().unwrap_or(0);
+        let gpio_name = pin_def.name.values().next().cloned().unwrap_or_else(|| format!("gpio{}", line_offset));
 
         let mut pwm_chip_dir: Option<String> = None;
         if pin_def.pwm_chip_sysfs.is_some() {
@@ -3391,9 +3340,9 @@ pub(crate) fn get_data() -> (
 
         let channel_board = ChannelInfo {
             channel: pin_def.board.clone(),
-            gpio_chip_dir: gpio_chip_dirs.get(&pin_def.chip_sysfs).unwrap().clone(),
+            gpio_chip_dir: pin_def.chip_sysfs.clone(),
             gpio: pin_def.gpio.clone(),
-            global_gpio: gpio.clone(),
+            global_gpio: line_offset,
             global_gpio_name: gpio_name.clone(),
             pwm_chip_dir: pwm_chip_dir.clone(),
             pwm_id: pin_def.pwm_id.clone(),
@@ -3401,9 +3350,9 @@ pub(crate) fn get_data() -> (
 
         let channel_bcm = ChannelInfo {
             channel: pin_def.bcm.clone(),
-            gpio_chip_dir: gpio_chip_dirs.get(&pin_def.chip_sysfs).unwrap().clone(),
+            gpio_chip_dir: pin_def.chip_sysfs.clone(),
             gpio: pin_def.gpio.clone(),
-            global_gpio: gpio.clone(),
+            global_gpio: line_offset,
             global_gpio_name: gpio_name.clone(),
             pwm_chip_dir: pwm_chip_dir.clone(),
             pwm_id: pin_def.pwm_id.clone(),
