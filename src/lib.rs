@@ -11,4 +11,5 @@ pub mod gpio_cdev;
 
 pub mod gpio_pin_data;
 
+pub use gpio::{GPIO, Direction, Level};
 pub use gpio_pin_data::*;
