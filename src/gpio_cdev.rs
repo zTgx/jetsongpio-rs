@@ -15,9 +15,9 @@
 //! let chip_fd = chip_open_by_label("tegra234-gpio")?;
 //! ```
 use anyhow::{Error, Result};
+use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
-use std::ffi::CStr;
 
 /// GPIO character device constants
 pub const GPIOHANDLE_REQUEST_INPUT: u32 = 0x1;
@@ -185,13 +185,14 @@ pub fn chip_check_info(label: &str, gpio_device: &str) -> Result<Option<File>> {
         let result = libc::ioctl(fd, GPIO_GET_CHIPINFO_IOCTL as libc::c_ulong, &mut chip_info);
         if result < 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
-            return Err(Error::msg(format!("Querying GPIO chip info: errno {}", errno)));
+            return Err(Error::msg(format!(
+                "Querying GPIO chip info: errno {}",
+                errno
+            )));
         }
     }
 
-    let label_cstr = unsafe { 
-        CStr::from_ptr(chip_info.label.as_ptr() as *const std::ffi::c_char) 
-    };
+    let label_cstr = unsafe { CStr::from_ptr(chip_info.label.as_ptr() as *const std::ffi::c_char) };
     let label_str = label_cstr.to_string_lossy();
 
     // 使用传入的 label 参数进行比较，而不是硬编码
@@ -215,7 +216,9 @@ pub fn chip_check_info(label: &str, gpio_device: &str) -> Result<Option<File>> {
 pub fn chip_open_by_label(label: &str) -> Result<File> {
     let dev = "/dev";
 
-    for entry in std::fs::read_dir(dev).map_err(|e| Error::msg(format!("Reading /dev directory: {}", e)))? {
+    for entry in
+        std::fs::read_dir(dev).map_err(|e| Error::msg(format!("Reading /dev directory: {}", e)))?
+    {
         let entry = entry?;
         let device_name = entry.file_name().to_string_lossy().into_owned();
         if device_name.starts_with("gpiochip") {
@@ -226,7 +229,10 @@ pub fn chip_open_by_label(label: &str) -> Result<File> {
         }
     }
 
-    Err(Error::msg(format!("{}: No such gpio device registered", label)))
+    Err(Error::msg(format!(
+        "{}: No such gpio device registered",
+        label
+    )))
 }
 
 /// Close a chip
@@ -260,10 +266,17 @@ pub fn open_line(request: &mut GpioHandleRequest, chip_fd: &File) -> Result<i32>
     let fd = chip_fd.as_raw_fd();
 
     unsafe {
-        let result = libc::ioctl(fd, GPIO_GET_LINEHANDLE_IOCTL as libc::c_ulong, &mut *request);
+        let result = libc::ioctl(
+            fd,
+            GPIO_GET_LINEHANDLE_IOCTL as libc::c_ulong,
+            &mut *request,
+        );
         if result < 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
-            return Err(Error::msg(format!("Opening output line handle: errno {}", errno)));
+            return Err(Error::msg(format!(
+                "Opening output line handle: errno {}",
+                errno
+            )));
         }
     }
 
@@ -291,7 +304,10 @@ pub fn close_line(line_handle: Option<i32>) -> Result<()> {
                 let result = libc::close(fd);
                 if result < 0 {
                     let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
-                    return Err(Error::msg(format!("Closing existing GPIO line: errno {}", errno)));
+                    return Err(Error::msg(format!(
+                        "Closing existing GPIO line: errno {}",
+                        errno
+                    )));
                 }
             }
         }
@@ -311,7 +327,12 @@ pub fn close_line(line_handle: Option<i32>) -> Result<()> {
 /// # Returns
 ///
 /// * `GpioHandleRequest` - Configured request structure
-pub fn request_handle(line_offset: u32, direction: u32, initial: Option<u8>, consumer: &str) -> Result<GpioHandleRequest> {
+pub fn request_handle(
+    line_offset: u32,
+    direction: u32,
+    initial: Option<u8>,
+    consumer: &str,
+) -> Result<GpioHandleRequest> {
     let mut request = GpioHandleRequest::default();
     request.lineoffsets[0] = line_offset;
     request.flags = direction;
@@ -371,12 +392,14 @@ pub fn request_event(line_offset: u32, edge: u32, consumer: &str) -> Result<Gpio
 ///
 /// * `Result<u8>` - Current value of the line (0 or 1)
 pub fn get_value(line_handle: i32) -> Result<u8> {
-    let mut data = GpioHandleData {
-        values: [0; 64],
-    };
+    let mut data = GpioHandleData { values: [0; 64] };
 
     unsafe {
-        let result = libc::ioctl(line_handle, GPIOHANDLE_GET_LINE_VALUES_IOCTL as libc::c_ulong, &mut data);
+        let result = libc::ioctl(
+            line_handle,
+            GPIOHANDLE_GET_LINE_VALUES_IOCTL as libc::c_ulong,
+            &mut data,
+        );
         if result < 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
             return Err(Error::msg(format!("Getting line value: errno {}", errno)));
@@ -397,13 +420,15 @@ pub fn get_value(line_handle: i32) -> Result<u8> {
 ///
 /// * `Result<()>` - Success or error
 pub fn set_value(line_handle: i32, value: u8) -> Result<()> {
-    let mut data = GpioHandleData {
-        values: [0; 64],
-    };
+    let mut data = GpioHandleData { values: [0; 64] };
     data.values[0] = value;
 
     unsafe {
-        let result = libc::ioctl(line_handle, GPIOHANDLE_SET_LINE_VALUES_IOCTL as libc::c_ulong, &data);
+        let result = libc::ioctl(
+            line_handle,
+            GPIOHANDLE_SET_LINE_VALUES_IOCTL as libc::c_ulong,
+            &data,
+        );
         if result < 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
             return Err(Error::msg(format!("Setting line value: errno {}", errno)));
@@ -510,22 +535,38 @@ pub fn check_pinmux(reg_addr: Option<u32>, direction: u32, channel: u32) -> Resu
         // If user sets direction to input, but register is output, warn user
         if !is_out && !reg.is_input {
             let corrected_input = reg_value | ((1 << 6) | (1 << 4));
-            eprintln!("[WARNING] User requested input for channel \"{}\", but it is set to output in pinmux.", channel);
+            eprintln!(
+                "[WARNING] User requested input for channel \"{}\", but it is set to output in pinmux.",
+                channel
+            );
             eprintln!("This can be resolved *temporarily* (until next restart) by running:");
-            eprintln!("    sudo busybox devmem 0x{:X} w 0x{:X}", reg_addr, corrected_input);
+            eprintln!(
+                "    sudo busybox devmem 0x{:X} w 0x{:X}",
+                reg_addr, corrected_input
+            );
             eprintln!("For more information on resolving this, please see:");
-            eprintln!("https://docs.nvidia.com/jetson/archives/r36.3/DeveloperGuide/HR/JetsonModuleAdaptationAndBringUp/JetsonOrinNxNanoSeries.html#generating-the-pinmux-dtsi-files");
+            eprintln!(
+                "https://docs.nvidia.com/jetson/archives/r36.3/DeveloperGuide/HR/JetsonModuleAdaptationAndBringUp/JetsonOrinNxNanoSeries.html#generating-the-pinmux-dtsi-files"
+            );
             return Ok(());
         }
 
         // Same as above, but for when user requests output
         if is_out && reg.is_input {
             let corrected_output = reg_value & !((1 << 6) | (1 << 4));
-            eprintln!("[WARNING] User requested output for channel \"{}\", but it is set to input in pinmux.", channel);
+            eprintln!(
+                "[WARNING] User requested output for channel \"{}\", but it is set to input in pinmux.",
+                channel
+            );
             eprintln!("This can be resolved *temporarily* (until next restart) by running:");
-            eprintln!("    sudo busybox devmem 0x{:X} w 0x{:X}", reg_addr, corrected_output);
+            eprintln!(
+                "    sudo busybox devmem 0x{:X} w 0x{:X}",
+                reg_addr, corrected_output
+            );
             eprintln!("For more information on resolving this, please see:");
-            eprintln!("https://docs.nvidia.com/jetson/archives/r36.3/DeveloperGuide/HR/JetsonModuleAdaptationAndBringUp/JetsonOrinNxNanoSeries.html#generating-the-pinmux-dtsi-files");
+            eprintln!(
+                "https://docs.nvidia.com/jetson/archives/r36.3/DeveloperGuide/HR/JetsonModuleAdaptationAndBringUp/JetsonOrinNxNanoSeries.html#generating-the-pinmux-dtsi-files"
+            );
             return Ok(());
         }
     }

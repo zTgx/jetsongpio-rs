@@ -1,4 +1,4 @@
-use jetsongpio::{GPIO, gpio::Direction, Level, Mode};
+use jetsongpio::{GPIO, Level, Mode, gpio::Direction};
 use std::thread;
 use std::time::Duration;
 
@@ -11,7 +11,8 @@ fn main() {
     gpio.setmode(Mode::BOARD).unwrap();
 
     // Setup PIN as output with initial LOW value
-    gpio.setup(vec![PIN], Direction::OUT, Some(Level::LOW)).unwrap();
+    gpio.setup(vec![PIN], Direction::OUT, Some(Level::LOW))
+        .unwrap();
     println!("PIN {} set to output mode", PIN);
 
     let mut count = 0;
@@ -31,13 +32,13 @@ fn main() {
         thread::sleep(Duration::from_secs(1));
 
         count += 1;
-        
+
         // Break after 10 iterations for safety
         if count >= 10 {
             break;
         }
     }
-    
+
     // Cleanup
     gpio.cleanup(Some(vec![PIN])).unwrap();
     println!("GPIO test completed and cleaned up.");

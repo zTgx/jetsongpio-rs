@@ -1,22 +1,12 @@
-use anyhow::Error;
-use std::{
-    collections::HashMap,
-    fs::OpenOptions,
-    path::Path,
-};
-use std::os::fd::AsRawFd;
 use crate::gpio_cdev::*;
-use crate::gpio_pin_data::{get_data, ChannelInfo, JetsonInfo, Mode};
+use crate::gpio_pin_data::{ChannelInfo, JetsonInfo, Mode, get_data};
+use anyhow::Error;
+use std::os::fd::AsRawFd;
+use std::{collections::HashMap, fs::OpenOptions, path::Path};
 
 // GPIO character device constants
 const GPIOHANDLE_REQUEST_INPUT: u32 = 0x1;
 const GPIOHANDLE_REQUEST_OUTPUT: u32 = 0x2;
-
-// ioctl codes (from linux/gpio.h)
-const GPIO_GET_CHIPINFO_IOCTL: u32 = 0x8044B401;
-const GPIO_GET_LINEHANDLE_IOCTL: u32 = 0xC16CB403;
-const GPIOHANDLE_GET_LINE_VALUES_IOCTL: u32 = 0xC040B408;
-const GPIOHANDLE_SET_LINE_VALUES_IOCTL: u32 = 0xC040B409;
 
 /// Specifies the GPIO pin value in output mode.
 ///
@@ -118,7 +108,10 @@ pub enum PullUpDown {
 
 impl PullUpDown {
     pub fn is_valid(&self) -> bool {
-        matches!(self, PullUpDown::PudOff | PullUpDown::PudDown | PullUpDown::PudUp)
+        matches!(
+            self,
+            PullUpDown::PudOff | PullUpDown::PudDown | PullUpDown::PudUp
+        )
     }
 }
 
@@ -128,9 +121,11 @@ fn check_write_access() -> Result<(), Error> {
     // Check if /dev/gpiochip0 exists (GPIO character device)
     let gpiochip_path = "/dev/gpiochip0";
     if !Path::new(gpiochip_path).exists() {
-        return Err(Error::msg("GPIO character device not found. This library requires a Jetson platform."));
+        return Err(Error::msg(
+            "GPIO character device not found. This library requires a Jetson platform.",
+        ));
     }
-    
+
     // Check if the current user has permissions to access the device
     if !Path::new(gpiochip_path).metadata().is_ok_and(|_m| {
         // Basic check: if we can access the device file
@@ -244,7 +239,9 @@ impl GPIO {
     fn validate_mode_set(&self) -> Result<(), Error> {
         match self.gpio_mode {
             Some(_) => Ok(()),
-            None => Err(Error::msg("Please set pin numbering mode using GPIO.setmode(Mode::BOARD), GPIO.setmode(Mode::BCM), GPIO.setmode(Mode::TEGRA_SOC) or GPIO.setmode(Mode::CVM)")),
+            None => Err(Error::msg(
+                "Please set pin numbering mode using GPIO.setmode(Mode::BOARD), GPIO.setmode(Mode::BCM), GPIO.setmode(Mode::TEGRA_SOC) or GPIO.setmode(Mode::CVM)",
+            )),
         }
     }
 
@@ -306,19 +303,34 @@ impl GPIO {
         self.channel_configuration.get(&ch_info.channel).copied()
     }
 
-    fn do_one_channel(&mut self, ch_info: ChannelInfo, direction: u32, initial: Option<u8>, consumer: &str) {
+    fn do_one_channel(
+        &mut self,
+        ch_info: ChannelInfo,
+        direction: u32,
+        initial: Option<u8>,
+        consumer: &str,
+    ) {
         let chip_name = ch_info.gpio_chip.clone();
         let chip_fd = if !self.chip_fd_map.contains_key(&chip_name) {
             let fd = chip_open_by_label(&chip_name).expect("Failed to open GPIO chip");
             self.chip_fd_map.insert(chip_name.clone(), fd);
-            self.chip_fd_map.get(&chip_name).unwrap().try_clone().expect("Failed to clone chip fd")
+            self.chip_fd_map
+                .get(&chip_name)
+                .unwrap()
+                .try_clone()
+                .expect("Failed to clone chip fd")
         } else {
-            self.chip_fd_map.get(&chip_name).unwrap().try_clone().expect("Failed to clone chip fd")
+            self.chip_fd_map
+                .get(&chip_name)
+                .unwrap()
+                .try_clone()
+                .expect("Failed to clone chip fd")
         };
 
         let chip_fd_raw = chip_fd.as_raw_fd();
 
-        let mut request = request_handle(ch_info.line_offset, direction, initial, consumer).expect("Failed to create request");
+        let mut request = request_handle(ch_info.line_offset, direction, initial, consumer)
+            .expect("Failed to create request");
         let line_handle = open_line(&mut request, &chip_fd).expect("Failed to open GPIO line");
 
         let mut ch_info = ch_info;
@@ -331,7 +343,8 @@ impl GPIO {
             }
         }
 
-        self.channel_configuration.insert(ch_info.channel, Direction::from_cdev(direction as i32));
+        self.channel_configuration
+            .insert(ch_info.channel, Direction::from_cdev(direction as i32));
         self.channel_data.insert(ch_info.channel, ch_info);
     }
 
@@ -366,7 +379,12 @@ impl GPIO {
 
     fn setup_single_out(&mut self, ch_info: ChannelInfo, initial: Option<Level>) {
         let initial_value = initial.map(|l| l as u8);
-        self.do_one_channel(ch_info, Direction::OUT.to_cdev(), initial_value, "jetsongpio-rs");
+        self.do_one_channel(
+            ch_info,
+            Direction::OUT.to_cdev(),
+            initial_value,
+            "jetsongpio-rs",
+        );
     }
 
     fn setup_single_in(&mut self, ch_info: ChannelInfo) {
@@ -390,7 +408,12 @@ impl GPIO {
     /// gpio.setmode(Mode::BOARD).unwrap();
     /// gpio.setup(vec![7], Direction::OUT, None).unwrap();
     /// ```
-    pub fn setup(&mut self, channels: Vec<u32>, direction: Direction, initial: Option<Level>) -> Result<(), Error> {
+    pub fn setup(
+        &mut self,
+        channels: Vec<u32>,
+        direction: Direction,
+        initial: Option<Level>,
+    ) -> Result<(), Error> {
         check_write_access()?;
 
         let ch_infos = self.channels_to_infos(channels, true, false)?;
@@ -425,7 +448,7 @@ impl GPIO {
                 }
             }
             _ => {
-                 return Err(Error::msg("Unsupported direction for setup()"));
+                return Err(Error::msg("Unsupported direction for setup()"));
             }
         }
 
@@ -441,7 +464,9 @@ impl GPIO {
         // warn if no channel is setup
         if self.gpio_mode.is_none() {
             if self.gpio_warnings {
-                println!("No channels have been set up yet - nothing to clean up! Try cleaning up at the end of your program instead!");
+                println!(
+                    "No channels have been set up yet - nothing to clean up! Try cleaning up at the end of your program instead!"
+                );
             }
             return Ok(());
         }
@@ -453,13 +478,16 @@ impl GPIO {
         }
 
         let ch_infos = self.channels_to_infos(channels.unwrap(), false, false)?;
-        let channels_to_cleanup: Vec<u32> = ch_infos.iter().filter_map(|ch_info| {
-            if self.channel_configuration.contains_key(&ch_info.channel) {
-                Some(ch_info.channel)
-            } else {
-                None
-            }
-        }).collect();
+        let channels_to_cleanup: Vec<u32> = ch_infos
+            .iter()
+            .filter_map(|ch_info| {
+                if self.channel_configuration.contains_key(&ch_info.channel) {
+                    Some(ch_info.channel)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         for channel in channels_to_cleanup {
             if let Some(ch_info) = self.channel_data.get(&channel).cloned() {
@@ -485,7 +513,9 @@ impl GPIO {
             return Err(Error::msg("You must setup() the GPIO channel first"));
         }
 
-        let line_handle = ch_info.line_handle.ok_or_else(|| Error::msg("GPIO line handle not found"))?;
+        let line_handle = ch_info
+            .line_handle
+            .ok_or_else(|| Error::msg("GPIO line handle not found"))?;
         let value = get_value(line_handle)?;
 
         match value {
@@ -521,12 +551,16 @@ impl GPIO {
         for ch_info in &ch_infos {
             let app_cfg = self.app_channel_configuration(ch_info);
             if app_cfg.is_none() || app_cfg.unwrap() != Direction::OUT {
-                return Err(Error::msg("The GPIO channel has not been set up as an OUTPUT"));
+                return Err(Error::msg(
+                    "The GPIO channel has not been set up as an OUTPUT",
+                ));
             }
         }
 
         for (ch_info, value) in ch_infos.iter().zip(values.iter()) {
-            let line_handle = ch_info.line_handle.ok_or_else(|| Error::msg("GPIO line handle not found"))?;
+            let line_handle = ch_info
+                .line_handle
+                .ok_or_else(|| Error::msg("GPIO line handle not found"))?;
             set_value(line_handle, *value as u8)?;
         }
 
