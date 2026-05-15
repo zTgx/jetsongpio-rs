@@ -4,8 +4,9 @@
 //!
 //! This is the Rust implementation of the Python library for controlling GPIO pins on NVIDIA Jetson devices.
 //!
+pub mod gpio;
+pub mod gpio_cdev;
+pub mod gpio_pin_data;
 
-mod gpio;
-mod gpio_pin_data;
 pub use gpio::*;
 pub use gpio_pin_data::*;
