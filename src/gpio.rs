@@ -1,17 +1,12 @@
 use anyhow::Error;
 use std::{
     collections::HashMap,
-    fs,
-    io::Write,
+    fs::OpenOptions,
     path::Path,
-    thread,
-    time::Duration,
 };
 use std::os::fd::AsRawFd;
 use crate::gpio_cdev::*;
 use crate::gpio_pin_data::{get_data, ChannelInfo, JetsonInfo, Mode};
-
-static SYSFS_ROOT: &str = "/sys/class/gpio";
 
 // GPIO character device constants
 const GPIOHANDLE_REQUEST_INPUT: u32 = 0x1;
@@ -139,7 +134,7 @@ fn check_write_access() -> Result<(), Error> {
     // Check if the current user has permissions to access the device
     if !Path::new(gpiochip_path).metadata().is_ok_and(|_m| {
         // Basic check: if we can access the device file
-        std::fs::OpenOptions::new()
+        OpenOptions::new()
             .read(true)
             .write(true)
             .open(gpiochip_path)
@@ -150,105 +145,6 @@ fn check_write_access() -> Result<(), Error> {
         ));
     }
     Ok(())
-}
-
-// Sysfs functions - DEPRECATED: These are no longer used as we now use GPIO character device API
-#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
-fn sysfs_channel_configuration(ch_info: &ChannelInfo) -> Option<Direction> {
-    // """Return the current configuration of a channel as reported by sysfs. Any
-    // of IN, OUT, PWM, or None may be returned."""
-
-    if let Some(pwm_chip_dir) = &ch_info.pwm_chip_dir {
-        if let Some(pwm_id) = ch_info.pwm_id {
-            let pwm_dir = format!("{}/pwm{}", pwm_chip_dir, pwm_id);
-            if Path::new(&pwm_dir).exists() {
-                return Some(Direction::HardPwm);
-            }
-        }
-    }
-
-    let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
-    if !Path::new(&gpio_dir).exists() {
-        return None;
-    }
-
-    let direction_path = format!("{}/direction", gpio_dir);
-    let gpio_direction = fs::read_to_string(&direction_path).unwrap_or_default();
-    match gpio_direction.trim() {
-        "in" => Some(Direction::IN),
-        "out" => Some(Direction::OUT),
-        _ => None,
-    }
-}
-
-#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
-fn export_gpio(ch_info: &ChannelInfo) {
-    let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
-    if !Path::new(&gpio_dir).exists() {
-        let export_path = format!("{}/export", SYSFS_ROOT);
-        let mut f_export = fs::OpenOptions::new()
-            .write(true)
-            .open(&export_path)
-            .unwrap();
-        f_export
-            .write_all(ch_info.line_offset.to_string().as_bytes()) // Using line_offset instead of global_gpio
-            .unwrap();
-    }
-
-    let value_path = format!("{}/value", gpio_dir);
-    while !Path::new(&value_path).exists() {
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
-fn unexport_gpio(ch_info: &ChannelInfo) {
-    let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
-    if Path::new(&gpio_dir).exists() {
-        let unexport_path = format!("{}/unexport", SYSFS_ROOT);
-        let mut f_unexport = fs::OpenOptions::new()
-            .write(true)
-            .open(&unexport_path)
-            .unwrap();
-        f_unexport
-            .write_all(ch_info.line_offset.to_string().as_bytes()) // Using line_offset instead of global_gpio
-            .unwrap();
-    }
-}
-
-#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
-fn write_sysfs_file(path: &str, data: &[u8]) {
-    let mut f = fs::OpenOptions::new().write(true).open(path).unwrap();
-    f.write_all(data).unwrap();
-}
-
-#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
-fn write_direction(ch_info: &ChannelInfo, direction: &str) {
-    let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
-    write_sysfs_file(&format!("{}/direction", gpio_dir), direction.as_bytes());
-}
-
-#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
-fn write_value(ch_info: &ChannelInfo, value: &str) {
-    let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
-    write_sysfs_file(&format!("{}/value", gpio_dir), value.as_bytes());
-}
-
-#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
-fn read_value(ch_info: &ChannelInfo) -> String {
-    let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
-    let value_path = format!("{}/value", gpio_dir);
-    fs::read_to_string(&value_path).unwrap_or_default()
-}
-
-#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
-fn output_one(ch_info: &ChannelInfo, value: Level) {
-    let value_str = match value {
-        Level::HIGH => "1",
-        Level::LOW => "0",
-    };
-
-    write_value(ch_info, value_str);
 }
 
 /// A public struct that holds state information about the GPIO pins.
@@ -507,26 +403,10 @@ impl GPIO {
         // Clone needed data before mutating self
         let ch_infos_owned: Vec<ChannelInfo> = ch_infos.iter().map(|&ch| ch.clone()).collect();
 
-        // Warnings check
-        if self.gpio_warnings {
-            for ch_info in ch_infos_owned.iter() {
-                let _sysfs_cfg = sysfs_channel_configuration(ch_info);
-                let _app_cfg = self.app_channel_configuration(ch_info);
-                // Note: sysfs_channel_configuration is deprecated but kept for backward compatibility
-                // The character device API handles channel state internally
-            }
-        }
-
-        // Collect channels that need cleanup
-        let channels_to_cleanup: Vec<u32> = ch_infos_owned.iter()
-            .filter(|ch_info| self.channel_configuration.contains_key(&ch_info.channel))
-            .map(|ch_info| ch_info.channel)
-            .collect();
-
         // cleanup if the channel is already setup
-        for channel in channels_to_cleanup {
-            if let Some(ch_info) = self.channel_data.get(&channel).cloned() {
-                self.cleanup_one(ch_info);
+        for ch_info in ch_infos_owned.iter() {
+            if self.channel_configuration.contains_key(&ch_info.channel) {
+                self.cleanup_one(ch_info.clone());
             }
         }
 
