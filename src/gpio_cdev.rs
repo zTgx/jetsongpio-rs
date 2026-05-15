@@ -188,7 +188,7 @@ pub fn chip_check_info(label: &str, gpio_device: &str) -> Result<Option<File>> {
         }
     }
 
-    let label_str = unsafe { std::ffi::CStr::from_ptr(chip_info.label.as_ptr() as *const i8) }
+    let label_str = unsafe { std::ffi::CStr::from_ptr(chip_info.label.as_ptr() as *const u8) }
         .to_string_lossy()
         .into_owned();
 
