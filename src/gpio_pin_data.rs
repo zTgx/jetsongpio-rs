@@ -510,7 +510,7 @@ impl GpioPin {
 }
 
 pub fn get_data() -> (String, JetsonInfo, HashMap<Mode, HashMap<u32, ChannelInfo>>) {
-    let model = get_model();
+    let model = get_model().unwrap();
 
     let (pin_defs, jetson_info) = get_jetson_data(&model);
     let mut all_modes = HashMap::new();
@@ -720,24 +720,127 @@ fn get_jetson_data(model: &str) -> (Vec<GpioPin>, JetsonInfo) {
     }
 }
 
-fn get_model() -> String {
-    // In a real implementation, we would detect the model from the system
-    // For now, we'll use an environment variable for testing or default to a model
-    match std::env::var("JETSON_MODEL_NAME") {
-        Ok(model_name) => {
-            if get_jetson_models().contains(&model_name.as_str()) {
-                model_name
-            } else {
-                eprintln!("Environment variable 'JETSON_MODEL_NAME={}' is invalid.", model_name);
-                "JETSON_NANO".to_string() // Default fallback
-            }
-        }
-        Err(_) => {
-            // In a real implementation, we would check /proc/device-tree/compatible
-            // For now, default to a common model
-            "JETSON_NANO".to_string()
+use std::io::Read;
+use std::fs;
+use std::path::Path;
+/// 读取设备树兼容性字符串
+/// 兼容性字符串是以 '\0' 分隔的字符串列表
+fn get_compatibles(path: &str) -> Result<Vec<String>, String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    
+    // 按 '\0' 分割并过滤空字符串
+    let compatibles: Vec<String> = buffer
+        .split(|&b| b == 0)
+        .filter(|bytes| !bytes.is_empty())
+        .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
+        .collect();
+    
+    if compatibles.is_empty() {
+        return Err(format!("No compatible strings found in {}", path));
+    }
+    
+    Ok(compatibles)
+}
+
+pub fn get_model() -> Result<String, String> {
+    // 首先检查测试环境变量
+    if let Ok(model_name) = std::env::var("JETSON_TESTING_MODEL_NAME") {
+        let model_name = model_name.trim().to_string();
+        if get_jetson_models().contains(&model_name.as_str()) {
+            return Ok(model_name);
+        } else {
+            eprintln!("Environment variable 'JETSON_TESTING_MODEL_NAME={}' is invalid.", model_name);
         }
     }
+
+    // 从设备树获取型号信息
+    let compatible_path = "/proc/device-tree/compatible";
+    if Path::new(compatible_path).exists() {
+        let compatibles = get_compatibles(compatible_path)?;
+        
+        // TX1
+        if matches_any(&compatibles, &get_compats_tx1()) {
+            warn_if_not_carrier_board(&["2597"])?;
+            return Ok(JETSON_TX1.to_string());
+        }
+        // TX2
+        else if matches_any(&compatibles, &get_compats_tx2()) {
+            warn_if_not_carrier_board(&["2597"])?;
+            return Ok(JETSON_TX2.to_string());
+        }
+        // CLARA AGX Xavier
+        else if matches_any(&compatibles, &get_compats_clara_agx_xavier()) {
+            warn_if_not_carrier_board(&["3900"])?;
+            return Ok(CLARA_AGX_XAVIER.to_string());
+        }
+        // TX2 NX
+        else if matches_any(&compatibles, &get_compats_tx2_nx()) {
+            warn_if_not_carrier_board(&["3509"])?;
+            return Ok(JETSON_TX2_NX.to_string());
+        }
+        // Xavier
+        else if matches_any(&compatibles, &get_compats_xavier()) {
+            warn_if_not_carrier_board(&["2822"])?;
+            return Ok(JETSON_XAVIER.to_string());
+        }
+        // Nano
+        else if matches_any(&compatibles, &get_compats_nano()) {
+            let module_id = find_pmgr_board("3448")?;
+            let revision = module_id.split('-').last().unwrap_or("");
+            // Revision is an ordered string, not a decimal integer
+            if revision < "200" {
+                return Err("Jetson Nano module revision must be A02 or later".to_string());
+            }
+            warn_if_not_carrier_board(&["3449", "3542"])?;
+            return Ok(JETSON_NANO.to_string());
+        }
+        // NX
+        else if matches_any(&compatibles, &get_compats_nx()) {
+            warn_if_not_carrier_board(&["3509", "3449"])?;
+            return Ok(JETSON_NX.to_string());
+        }
+        // Orin
+        else if matches_any(&compatibles, &get_compats_jetson_orins()) {
+            warn_if_not_carrier_board(&["3737"])?;
+            return Ok(JETSON_ORIN.to_string());
+        }
+        // Orin NX
+        else if matches_any(&compatibles, &get_compats_jetson_orins_nx()) {
+            warn_if_not_carrier_board(&["3509", "3768"])?;
+            return Ok(JETSON_ORIN_NX.to_string());
+        }
+        // Orin Nano
+        else if matches_any(&compatibles, &get_compats_jetson_orins_nano()) {
+            warn_if_not_carrier_board(&["3509", "3768"])?;
+            return Ok(JETSON_ORIN_NANO.to_string());
+        }
+        // Thor Reference
+        else if matches_any(&compatibles, &get_compats_jetson_thor_reference()) {
+            warn_if_not_carrier_board(&["3971", "4071"])?;
+            return Ok(JETSON_THOR_REFERENCE.to_string());
+        }
+    }
+
+    // 对于 Docker 容器，从环境变量获取型号
+    if let Ok(model_name) = std::env::var("JETSON_MODEL_NAME") {
+        let model_name = model_name.trim().to_string();
+        if get_jetson_models().contains(&model_name.as_str()) {
+            return Ok(model_name);
+        } else {
+            eprintln!("Environment variable 'JETSON_MODEL_NAME={}' is invalid.", model_name);
+        }
+    }
+
+    Err("Could not determine Jetson model".to_string())
+}
+
+/// 检查兼容性字符串列表中是否包含任意一个模式
+fn matches_any(compatibles: &[String], patterns: &[&str]) -> bool {
+    patterns.iter().any(|pattern| {
+        compatibles.iter().any(|compatible| compatible.contains(pattern))
+    })
 }
 
 // Helper function to convert string to u32 for use as key in hash maps
@@ -748,4 +851,73 @@ fn hash_string(s: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
+}
+
+static mut WARNED: bool = false;
+
+fn warn_if_not_carrier_board(carrier_boards: &[&str]) -> Result<(), String> {
+    let mut found = false;
+    
+    for &board in carrier_boards {
+        if let Ok(found_board) = find_pmgr_board(board) {
+            if found_board.starts_with(board) {
+                found = true;
+                break;
+            }
+        }
+    }
+    
+    if !found {
+        unsafe {
+            if !WARNED {
+                WARNED = true;
+                eprintln!(
+                    "WARNING: Carrier board is not from a Jetson Developer Kit.\n\
+                     WARNING: Jetson.GPIO library has not been verified with this carrier board,\n\
+                     WARNING: and in fact is unlikely to work correctly."
+                );
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+
+/// 查找 Plugin Manager 中的板卡 ID
+fn find_pmgr_board(prefix: &str) -> Result<String, String> {
+    let ids_paths = [
+        "/proc/device-tree/chosen/plugin-manager/ids",
+        "/proc/device-tree/chosen/ids",
+    ];
+    
+    for ids_path in ids_paths {
+        if Path::new(ids_path).exists() {
+            // 检查是否是目录（旧版本内核）
+            if Path::new(ids_path).is_dir() {
+                if let Ok(entries) = fs::read_dir(ids_path) {
+                    for entry in entries.flatten() {
+                        let file_name = entry.file_name();
+                        if let Some(name) = file_name.to_str() {
+                            if name.starts_with(prefix) {
+                                return Ok(name.to_string());
+                            }
+                        }
+                    }
+                }
+            } 
+            // 检查是否是文件（新版本内核 K510）
+            else if Path::new(ids_path).is_file() {
+                if let Ok(content) = fs::read_to_string(ids_path) {
+                    for s in content.split_whitespace() {
+                        if s.starts_with(prefix) {
+                            return Ok(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Err(format!("Could not find PMGR board with prefix '{}'", prefix))
 }
