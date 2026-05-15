@@ -20,27 +20,27 @@ pub struct ChannelInfo {
 pub enum Direction {
     IN = 0,
     OUT = 1,
-    HARD_PWM = 43,
+    HardPwm = 43,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Mode {
     BOARD,
     BCM,
-    TEGRA_SOC,
+    TegraSoc,
     CVM,
 }
 
 impl Mode {
     pub fn is_valid(&self) -> bool {
-        matches!(self, Mode::BOARD | Mode::BCM | Mode::TEGRA_SOC | Mode::CVM)
+        matches!(self, Mode::BOARD | Mode::BCM | Mode::TegraSoc | Mode::CVM)
     }
 
     pub fn to_str(&self) -> &'static str {
         match self {
             Mode::BOARD => "BOARD",
             Mode::BCM => "BCM",
-            Mode::TEGRA_SOC => "TEGRA_SOC",
+            Mode::TegraSoc => "TegraSoc",
             Mode::CVM => "CVM",
         }
     }
@@ -2890,7 +2890,7 @@ pub struct GpioPin {
     pub board_pin: u32,        // Pin number (BOARD mode)
     pub bcm_pin: u32,          // Pin number (BCM mode)
     pub cvm_pin: String,       // Pin name (CVM mode)
-    pub tegra_soc_pin: String, // Pin name (TEGRA_SOC mode)
+    pub tegra_soc_pin: String, // Pin name (TegraSoc mode)
     pub pwm_chip_sysfs_dir: Option<String>,
     pub pwm_id: Option<u32>,
     pub padctl_addr: Option<u32>,
@@ -3028,7 +3028,7 @@ pub fn get_data() -> (String, JetsonInfo, HashMap<Mode, HashMap<u32, ChannelInfo
     all_modes.insert(Mode::BOARD, board_channels);
     all_modes.insert(Mode::BCM, bcm_channels);
     all_modes.insert(Mode::CVM, cvm_channels);
-    all_modes.insert(Mode::TEGRA_SOC, tegra_soc_channels);
+    all_modes.insert(Mode::TegraSoc, tegra_soc_channels);
 
     (model, jetson_info, all_modes)
 }
