@@ -7,7 +7,8 @@ use std::{
     thread,
     time::Duration,
 };
-
+use std::os::fd::AsRawFd;
+use crate::gpio_cdev::*;
 use crate::gpio_pin_data::{get_data, ChannelInfo, JetsonInfo, Mode};
 
 static SYSFS_ROOT: &str = "/sys/class/gpio";
@@ -51,7 +52,7 @@ pub enum Level {
 ///
 /// * `IN` - Input
 /// * `OUT` - Output
-/// * `HARD_PWM` - Hardware PWM output
+/// * `HardPwm` - Hardware PWM output
 /// * `UNKNOWN` - Unknown direction for GPIOs that are not yet setup
 ///
 /// # Example
@@ -71,12 +72,30 @@ pub enum Direction {
     UNKNOWN = -1,
     OUT = 0,
     IN = 1,
-    HARD_PWM = 43,
+    HardPwm = 43,
 }
 
 impl Direction {
     pub fn is_valid(&self) -> bool {
-        matches!(self, Direction::OUT | Direction::IN | Direction::HARD_PWM)
+        matches!(self, Direction::OUT | Direction::IN | Direction::HardPwm)
+    }
+
+    fn from_cdev(value: i32) -> Self {
+        if value == GPIOHANDLE_REQUEST_INPUT as i32 {
+            Direction::IN
+        } else if value == GPIOHANDLE_REQUEST_OUTPUT as i32 {
+            Direction::OUT
+        } else {
+            Direction::UNKNOWN
+        }
+    }
+
+    fn to_cdev(&self) -> u32 {
+        match self {
+            Direction::IN => GPIOHANDLE_REQUEST_INPUT,
+            Direction::OUT => GPIOHANDLE_REQUEST_OUTPUT,
+            _ => GPIOHANDLE_REQUEST_INPUT,
+        }
     }
 }
 
@@ -97,14 +116,14 @@ impl Edge {
 // Pull up/down options
 #[derive(PartialEq, Clone, Copy)]
 pub enum PullUpDown {
-    PUD_OFF = 20,  // 0 + _PUD_OFFSET (20)
-    PUD_DOWN = 21, // 1 + _PUD_OFFSET (20)
-    PUD_UP = 22,   // 2 + _PUD_OFFSET (20)
+    PudOff = 20,  // 0 + _PUD_OFFSET (20)
+    PudDown = 21, // 1 + _PUD_OFFSET (20)
+    PudUp = 22,   // 2 + _PUD_OFFSET (20)
 }
 
 impl PullUpDown {
     pub fn is_valid(&self) -> bool {
-        matches!(self, PullUpDown::PUD_OFF | PullUpDown::PUD_DOWN | PullUpDown::PUD_UP)
+        matches!(self, PullUpDown::PudOff | PullUpDown::PudDown | PullUpDown::PudUp)
     }
 }
 
@@ -133,6 +152,8 @@ fn check_write_access() -> Result<(), Error> {
     Ok(())
 }
 
+// Sysfs functions - DEPRECATED: These are no longer used as we now use GPIO character device API
+#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
 fn sysfs_channel_configuration(ch_info: &ChannelInfo) -> Option<Direction> {
     // """Return the current configuration of a channel as reported by sysfs. Any
     // of IN, OUT, PWM, or None may be returned."""
@@ -141,7 +162,7 @@ fn sysfs_channel_configuration(ch_info: &ChannelInfo) -> Option<Direction> {
         if let Some(pwm_id) = ch_info.pwm_id {
             let pwm_dir = format!("{}/pwm{}", pwm_chip_dir, pwm_id);
             if Path::new(&pwm_dir).exists() {
-                return Some(Direction::HARD_PWM);
+                return Some(Direction::HardPwm);
             }
         }
     }
@@ -160,6 +181,7 @@ fn sysfs_channel_configuration(ch_info: &ChannelInfo) -> Option<Direction> {
     }
 }
 
+#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
 fn export_gpio(ch_info: &ChannelInfo) {
     let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
     if !Path::new(&gpio_dir).exists() {
@@ -179,6 +201,7 @@ fn export_gpio(ch_info: &ChannelInfo) {
     }
 }
 
+#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
 fn unexport_gpio(ch_info: &ChannelInfo) {
     let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
     if Path::new(&gpio_dir).exists() {
@@ -193,27 +216,32 @@ fn unexport_gpio(ch_info: &ChannelInfo) {
     }
 }
 
+#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
 fn write_sysfs_file(path: &str, data: &[u8]) {
     let mut f = fs::OpenOptions::new().write(true).open(path).unwrap();
     f.write_all(data).unwrap();
 }
 
+#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
 fn write_direction(ch_info: &ChannelInfo, direction: &str) {
     let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
     write_sysfs_file(&format!("{}/direction", gpio_dir), direction.as_bytes());
 }
 
+#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
 fn write_value(ch_info: &ChannelInfo, value: &str) {
     let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
     write_sysfs_file(&format!("{}/value", gpio_dir), value.as_bytes());
 }
 
+#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
 fn read_value(ch_info: &ChannelInfo) -> String {
     let gpio_dir = format!("{}/{}", SYSFS_ROOT, ch_info.gpio_name); // Using gpio_name instead of global_gpio_name
     let value_path = format!("{}/value", gpio_dir);
     fs::read_to_string(&value_path).unwrap_or_default()
 }
 
+#[deprecated(since = "0.2.0", note = "Use GPIO character device API instead")]
 fn output_one(ch_info: &ChannelInfo, value: Level) {
     let value_str = match value {
         Level::HIGH => "1",
@@ -247,6 +275,9 @@ pub struct GPIO {
     gpio_warnings: bool,
     gpio_mode: Option<Mode>,
     channel_configuration: HashMap<u32, Direction>,
+
+    // Dictionary used as a lookup table from GPIO chip name to chip fd
+    chip_fd_map: HashMap<String, std::fs::File>,
 }
 
 impl GPIO {
@@ -266,6 +297,7 @@ impl GPIO {
             gpio_warnings: true,
             gpio_mode: None,
             channel_configuration: HashMap::new(),
+            chip_fd_map: HashMap::new(),
         }
     }
 
@@ -378,31 +410,57 @@ impl GPIO {
         self.channel_configuration.get(&ch_info.channel).copied()
     }
 
-    fn cleanup_one(&mut self, ch_info: &ChannelInfo) {
-        match self.channel_configuration.get(&ch_info.channel) {
-            Some(direction) => {
-                if direction == &Direction::HARD_PWM {
-                    // _disable_pwm(ch_info);
-                    // _unexport_pwm(ch_info);
-                } else {
-                    // event::event_cleanup(ch_info.gpio, ch_info.gpio_name);
-                    unexport_gpio(ch_info);
-                }
+    fn do_one_channel(&mut self, ch_info: ChannelInfo, direction: u32, initial: Option<u8>, consumer: &str) {
+        let chip_name = ch_info.gpio_chip.clone();
+        let chip_fd = if !self.chip_fd_map.contains_key(&chip_name) {
+            let fd = chip_open_by_label(&chip_name).expect("Failed to open GPIO chip");
+            self.chip_fd_map.insert(chip_name.clone(), fd);
+            self.chip_fd_map.get(&chip_name).unwrap().try_clone().expect("Failed to clone chip fd")
+        } else {
+            self.chip_fd_map.get(&chip_name).unwrap().try_clone().expect("Failed to clone chip fd")
+        };
+
+        let chip_fd_raw = chip_fd.as_raw_fd();
+
+        let mut request = request_handle(ch_info.line_offset, direction, initial, consumer).expect("Failed to create request");
+        let line_handle = open_line(&mut request, &chip_fd).expect("Failed to open GPIO line");
+
+        let mut ch_info = ch_info;
+        ch_info.chip_fd = Some(chip_fd_raw);
+        ch_info.line_handle = Some(line_handle);
+
+        if self.gpio_warnings {
+            if let Err(e) = check_pinmux(ch_info.reg_addr, direction, ch_info.channel) {
+                eprintln!("Pinmux check warning: {}", e);
             }
-            None => {}
         }
+
+        self.channel_configuration.insert(ch_info.channel, Direction::from_cdev(direction as i32));
+        self.channel_data.insert(ch_info.channel, ch_info);
+    }
+
+    fn cleanup_one(&mut self, ch_info: ChannelInfo) {
+        // Close the line handle
+        if let Some(line_handle) = ch_info.line_handle {
+            let _ = close_line(Some(line_handle));
+        }
+
+        // Clean up event detection if needed (future)
+        // event::event_cleanup(ch_info.gpio_chip, ch_info.channel);
 
         self.channel_configuration.remove(&ch_info.channel);
     }
 
     fn cleanup_all(&mut self) -> Result<(), Error> {
-        let ch_infos_to_cleanup: Vec<ChannelInfo> = self.channel_configuration
-            .keys()
-            .filter_map(|ch| self.channel_data.get(ch).cloned())
-            .collect();
+        // Close all chip file descriptors
+        for (_chip_name, chip_fd) in self.chip_fd_map.drain() {
+            let _ = close_chip(Some(chip_fd));
+        }
 
+        // Clean up all channels
+        let ch_infos_to_cleanup: Vec<ChannelInfo> = self.channel_data.values().cloned().collect();
         for ch_info in ch_infos_to_cleanup {
-            self.cleanup_one(&ch_info);
+            self.cleanup_one(ch_info);
         }
 
         self.gpio_mode = None;
@@ -410,24 +468,13 @@ impl GPIO {
         Ok(())
     }
 
-    fn setup_single_out(&mut self, ch_info: &ChannelInfo, initial: Option<Level>) {
-        export_gpio(ch_info);
-        write_direction(ch_info, "out");
-
-        if let Some(level) = initial {
-            output_one(ch_info, level);
-        }
-
-        self.channel_configuration
-            .insert(ch_info.channel, Direction::OUT);
+    fn setup_single_out(&mut self, ch_info: ChannelInfo, initial: Option<Level>) {
+        let initial_value = initial.map(|l| l as u8);
+        self.do_one_channel(ch_info, Direction::OUT.to_cdev(), initial_value, "jetsongpio-rs");
     }
 
-    fn setup_single_in(&mut self, ch_info: &ChannelInfo) {
-        export_gpio(ch_info);
-        write_direction(ch_info, "in");
-
-        self.channel_configuration
-            .insert(ch_info.channel, Direction::IN);
+    fn setup_single_in(&mut self, ch_info: ChannelInfo) {
+        self.do_one_channel(ch_info, Direction::IN.to_cdev(), None, "jetsongpio-rs");
     }
 
     /// Setup a channel or list of channels with a direction and (optional) pull/up down control and (optional) initial value.
@@ -457,35 +504,35 @@ impl GPIO {
             return Err(Error::msg("An invalid direction was passed to setup()"));
         }
 
-        if self.gpio_warnings {
-            for ch_info in ch_infos.iter() {
-                let sysfs_cfg = sysfs_channel_configuration(ch_info);
-                let app_cfg = self.app_channel_configuration(ch_info);
+        // Clone needed data before mutating self
+        let ch_infos_owned: Vec<ChannelInfo> = ch_infos.iter().map(|&ch| ch.clone()).collect();
 
-                // warn if channel has been setup external to current program
-                if app_cfg.is_none() && sysfs_cfg.is_some() {
-                    println!("This channel is already in use, continuing anyway. Use GPIO.setwarnings(False) to disable warnings");
-                }
+        // Warnings check
+        if self.gpio_warnings {
+            for ch_info in ch_infos_owned.iter() {
+                let _sysfs_cfg = sysfs_channel_configuration(ch_info);
+                let _app_cfg = self.app_channel_configuration(ch_info);
+                // Note: sysfs_channel_configuration is deprecated but kept for backward compatibility
+                // The character device API handles channel state internally
             }
         }
 
-        // cleanup if the channel is already setup
-        let channels_to_cleanup: Vec<u32> = ch_infos.iter()
+        // Collect channels that need cleanup
+        let channels_to_cleanup: Vec<u32> = ch_infos_owned.iter()
             .filter(|ch_info| self.channel_configuration.contains_key(&ch_info.channel))
             .map(|ch_info| ch_info.channel)
             .collect();
 
+        // cleanup if the channel is already setup
         for channel in channels_to_cleanup {
             if let Some(ch_info) = self.channel_data.get(&channel).cloned() {
-                // self.cleanup_one(&ch_info);
+                self.cleanup_one(ch_info);
             }
         }
 
-        let ch_infos_owned: Vec<ChannelInfo> = ch_infos.iter().map(|&ch| ch.clone()).collect();
-
         match direction {
             Direction::OUT => {
-                for ch_info in &ch_infos_owned {
+                for ch_info in ch_infos_owned {
                     self.setup_single_out(ch_info, initial);
                 }
             }
@@ -493,7 +540,7 @@ impl GPIO {
                 if initial.is_some() {
                     return Err(Error::msg("initial parameter is not valid for inputs"));
                 }
-                for ch_info in &ch_infos_owned {
+                for ch_info in ch_infos_owned {
                     self.setup_single_in(ch_info);
                 }
             }
@@ -536,7 +583,7 @@ impl GPIO {
 
         for channel in channels_to_cleanup {
             if let Some(ch_info) = self.channel_data.get(&channel).cloned() {
-                self.cleanup_one(&ch_info);
+                self.cleanup_one(ch_info);
             }
         }
 
@@ -558,8 +605,11 @@ impl GPIO {
             return Err(Error::msg("You must setup() the GPIO channel first"));
         }
 
-        match read_value(ch_info).trim() {
-            "0" => Ok(Level::LOW),
+        let line_handle = ch_info.line_handle.ok_or_else(|| Error::msg("GPIO line handle not found"))?;
+        let value = get_value(line_handle)?;
+
+        match value {
+            0 => Ok(Level::LOW),
             _ => Ok(Level::HIGH),
         }
     }
@@ -596,7 +646,8 @@ impl GPIO {
         }
 
         for (ch_info, value) in ch_infos.iter().zip(values.iter()) {
-            output_one(ch_info, *value);
+            let line_handle = ch_info.line_handle.ok_or_else(|| Error::msg("GPIO line handle not found"))?;
+            set_value(line_handle, *value as u8)?;
         }
 
         Ok(())
