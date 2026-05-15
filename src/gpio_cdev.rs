@@ -260,7 +260,7 @@ pub fn open_line(request: &mut GpioHandleRequest, chip_fd: &File) -> Result<i32>
     let fd = chip_fd.as_raw_fd();
 
     unsafe {
-        let result = libc::ioctl(fd, GPIO_GET_LINEHANDLE_IOCTL as libc::c_ulong, request.clone());
+        let result = libc::ioctl(fd, GPIO_GET_LINEHANDLE_IOCTL as libc::c_ulong, &mut *request);
         if result < 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
             return Err(Error::msg(format!("Opening output line handle: errno {}", errno)));
