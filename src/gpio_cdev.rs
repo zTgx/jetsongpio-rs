@@ -17,6 +17,7 @@
 use anyhow::{Error, Result};
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
+use std::ffi::CStr;
 
 /// GPIO character device constants
 pub const GPIOHANDLE_REQUEST_INPUT: u32 = 0x1;
@@ -188,11 +189,13 @@ pub fn chip_check_info(label: &str, gpio_device: &str) -> Result<Option<File>> {
         }
     }
 
-    let label_str = unsafe { std::ffi::CStr::from_ptr(chip_info.label.as_ptr() as *const u8) }
-        .to_string_lossy()
-        .into_owned();
+    let label_cstr = unsafe { 
+        CStr::from_ptr(chip_info.label.as_ptr() as *const std::ffi::c_char) 
+    };
+    let label_str = label_cstr.to_string_lossy();
 
-    if label != label_str {
+    // 使用传入的 label 参数进行比较，而不是硬编码
+    if label_str != label {
         let _ = close_chip(Some(chip_fd));
         return Ok(None);
     }
