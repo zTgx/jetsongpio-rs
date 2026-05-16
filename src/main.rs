@@ -1,3 +1,7 @@
+//! CLI entry point for the jetsongpio binary.
+
+use jetsongpio::cli;
+
 fn main() {
-    jetsongpio::cli::run();
+    cli::run();
 }
