@@ -13,3 +13,6 @@ pub mod gpio_pin_data;
 
 pub use gpio::{Direction, GPIO, Level};
 pub use gpio_pin_data::*;
+
+#[cfg(feature = "cli")]
+pub mod cli;

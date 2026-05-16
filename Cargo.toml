@@ -7,9 +7,15 @@ license = "MIT"
 repository = "https://github.com/ztgx/jetsongpio-rs"
 
 [[bin]]
-name = "pinmux_lookup"
-path = "bin/pinmux_lookup.rs"
+name = "jetsongpio"
+path = "src/bin/jetsongpio.rs"
+required-features = ["cli"]
 
 [dependencies]
 anyhow = "1.0"
 libc = "0.2"
+clap = { version = "4.5", features = ["derive"], optional = true }
+
+[features]
+default = ["cli"]
+cli = ["clap"]
