@@ -14,9 +14,6 @@
 *~
 .DS_Store
 
-# Build cache
-.cargo/
-
 # Python
 __pycache__/
 *.py[cod]

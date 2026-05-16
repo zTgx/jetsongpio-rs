@@ -12,9 +12,7 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [build-dependencies]
-chrono = "0.4"
 regex = "1"
-ureq = "2"
 
 [dependencies]
 anyhow = "1.0"
