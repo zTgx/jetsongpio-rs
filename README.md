@@ -25,6 +25,7 @@ Pin definitions are automatically synchronized from the upstream `jetson-gpio` r
 - GPIO character device API (not sysfs)
 - Pin numbering modes: BOARD, BCM, Tegra SOC, CVM
 - Input and output modes with configurable initial state
+- Hardware PWM output with configurable frequency and duty cycle
 - GPIO event detection (rising, falling, both edges) with epoll-based polling
 - Pinmux register address lookup
 - Automatic Jetson model detection via device tree
@@ -138,6 +139,37 @@ let direction = gpio.gpio_function(18)?;
 println!("Pin 18 direction: {:?}", direction);
 ```
 
+### Hardware PWM
+
+The library supports hardware PWM output via the Linux sysfs PWM interface:
+
+```rust
+use jetsongpio::{GPIO, Mode, PWM};
+
+let mut gpio = GPIO::new();
+gpio.setmode(Mode::BCM)?;
+
+// Create PWM on BCM pin 18 at 50 Hz
+let mut pwm = PWM::new(&mut gpio, 18, 50.0)?;
+
+// Start with 25% duty cycle
+pwm.start(25.0)?;
+
+// Change duty cycle
+pwm.set_duty_cycle(50.0)?;
+
+// Change frequency
+pwm.set_frequency(100.0)?;
+
+// Stop PWM output
+pwm.stop()?;
+```
+
+PWM-capable pins vary by model (BCM numbering):
+- Jetson AGX Xavier / Clara AGX Xavier / Jetson AGX Orin: pin 18
+- Jetson Nano / Jetson Xavier NX / Jetson Orin NX / Jetson Orin Nano: pin 33
+- Jetson TX2 NX: pin 32
+
 ### Cleanup
 
 Always call `cleanup()` before exiting to release GPIO lines:
@@ -207,6 +239,15 @@ cargo run --example simple_input
 
 # Button interrupt via edge detection
 cargo run --example button_interrupt
+
+# Button event detection (blocking mode)
+cargo run --example button_event
+
+# Hardware PWM breathing LED
+cargo run --example simple_pwm
+
+# GPIO output toggle on BOARD pin 29
+cargo run --example gpio
 ```
 
 ## Data Synchronization
