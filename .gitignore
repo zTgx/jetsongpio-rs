@@ -1,2 +1,32 @@
-/target
-.cargo/cache/
+# Compiled files
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+/Cargo.lock
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build cache
+.cargo/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+.Python
+
+# Testing
+/tests/output/
+
+# Logs
+*.log
