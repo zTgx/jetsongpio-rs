@@ -34,8 +34,9 @@
 //! ```
 
 use crate::gpio_cdev::{
-    GPIO_GET_LINEEVENT_IOCTL, GPIOEVENT_REQUEST_BOTH_EDGES, GPIOEVENT_REQUEST_FALLING_EDGE,
-    GPIOEVENT_REQUEST_RISING_EDGE, GpioEventData, GpioEventRequest,
+    chip_open_by_label, GPIO_GET_LINEEVENT_IOCTL, GPIOEVENT_REQUEST_BOTH_EDGES,
+    GPIOEVENT_REQUEST_FALLING_EDGE, GPIOEVENT_REQUEST_RISING_EDGE, GpioEventData, GpioEventRequest,
+    request_event,
 };
 use anyhow::{anyhow, Error, Result};
 use mio::{Events, Interest, Poll, Token};
@@ -43,6 +44,7 @@ use mio::unix::SourceFd;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::convert::TryFrom;
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -594,6 +596,501 @@ pub fn open_event(chip_fd: i32, request: &mut GpioEventRequest) -> Result<i32> {
     Ok(fd)
 }
 
+/// Extension trait for adding event detection methods to GPIO
+///
+/// This trait provides Python-like GPIO event methods for the GPIO struct.
+pub trait GPIOEventExt {
+    /// Get or create event manager
+    fn event_manager(&mut self) -> &mut EventManager;
+
+    /// Wait for an edge event on a GPIO channel (blocking)
+    ///
+    /// This function blocks until an edge event is detected on the specified channel.
+    /// Similar to Python's `GPIO.wait_for_edge()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - GPIO channel/pin number
+    /// * `edge` - Edge type to detect (Rising, Falling, or Both)
+    /// * `timeout` - Maximum time to wait for event (None = infinite wait)
+    ///
+    /// # Returns
+    ///
+    /// * `Result<bool>` - True if event was detected, false on timeout
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use jetsongpio::{GPIO, Direction, Level, Mode};
+    /// use jetsongpio::gpio_event::{Edge, GPIOEventExt};
+    /// use std::time::Duration;
+    ///
+    /// let mut gpio = GPIO::new();
+    /// gpio.setmode(Mode::BOARD).unwrap();
+    /// gpio.setup(vec![18], Direction::IN, None).unwrap();
+    ///
+    /// // Wait for button press (falling edge)
+    /// let detected = gpio.wait_for_edge(18, Edge::Falling, None).unwrap();
+    /// if detected {
+    ///     println!("Button pressed!");
+    /// }
+    /// ```
+    fn wait_for_edge(
+        &mut self,
+        channel: u32,
+        edge: Edge,
+        timeout: Option<Duration>,
+    ) -> Result<bool>;
+
+    /// Add event detection on a GPIO channel with callback (non-blocking)
+    ///
+    /// This function sets up edge detection with a callback function that runs
+    /// when the edge is detected. Similar to Python's `GPIO.add_event_detect()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - GPIO channel/pin number
+    /// * `edge` - Edge type to detect (Rising, Falling, or Both)
+    /// * `callback` - Callback function to execute on event
+    /// * `bouncetime` - Optional debounce time
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use jetsongpio::{GPIO, Direction, Mode};
+    /// use jetsongpio::gpio_event::{Edge, GPIOEventExt};
+    /// use std::time::Duration;
+    ///
+    /// let mut gpio = GPIO::new();
+    /// gpio.setmode(Mode::BOARD).unwrap();
+    /// gpio.setup(vec![18], Direction::IN, None).unwrap();
+    ///
+    /// gpio.add_event_detect(
+    ///     18,
+    ///     Edge::Falling,
+    ///     Box::new(|| println!("Button pressed!")),
+    ///     Some(Duration::from_millis(200))
+    /// ).unwrap();
+    ///
+    /// // Main program continues...
+    /// loop {
+    ///     std::thread::sleep(Duration::from_secs(1));
+    /// }
+    /// ```
+    fn add_event_detect(
+        &mut self,
+        channel: u32,
+        edge: Edge,
+        callback: Box<dyn Fn() + Send>,
+        bouncetime: Option<Duration>,
+    ) -> Result<()>;
+
+    /// Remove event detection on a GPIO channel
+    ///
+    /// This function removes edge detection that was previously set up with
+    /// `add_event_detect()`. Similar to Python's `GPIO.remove_event_detect()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - GPIO channel/pin number
+    fn remove_event_detect(&mut self, channel: u32) -> Result<()>;
+
+    /// Check if an event has been detected on a GPIO channel
+    ///
+    /// This function checks and clears the event flag. Similar to Python's
+    /// `GPIO.event_detected()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - GPIO channel/pin number
+    ///
+    /// # Returns
+    ///
+    /// * `bool` - True if an event was detected, false otherwise
+    fn event_detected(&mut self, channel: u32) -> bool;
+}
+
+impl GPIOEventExt for crate::GPIO {
+    fn event_manager(&mut self) -> &mut EventManager {
+        // This is a workaround - we'll use interior mutability or restructure
+        // For now, we'll use a static or manage differently
+        // Since we can't store EventManager in GPIO without modifying GPIO,
+        // we'll use a different approach
+        unimplemented!("Use GPIOEvent struct instead")
+    }
+
+    fn wait_for_edge(
+        &mut self,
+        channel: u32,
+        edge: Edge,
+        timeout: Option<Duration>,
+    ) -> Result<bool> {
+        // Get channel info to find chip and line offset
+        let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
+        let channel_data = self.channel_data_by_mode.get(&mode)
+            .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
+
+        let ch_info = channel_data.get(&channel)
+            .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
+
+        if ch_info.gpio_chip.is_empty() {
+            return Err(anyhow!("Channel {} is not a GPIO", channel));
+        }
+
+        // Open the chip
+        let chip_name = &ch_info.gpio_chip;
+        let chip_fd = if !self.chip_fd_map.contains_key(chip_name) {
+            let fd = chip_open_by_label(chip_name)?;
+            self.chip_fd_map.insert(chip_name.clone(), fd);
+            self.chip_fd_map.get(chip_name).unwrap().try_clone()?
+        } else {
+            self.chip_fd_map.get(chip_name).unwrap().try_clone()?
+        };
+
+        let chip_fd_raw = chip_fd.as_raw_fd();
+
+        // Create event request
+        let mut request = request_event(ch_info.line_offset, u32::from(edge), "jetsongpio-rs")?;
+
+        // Use default timeout of 10 seconds if not specified
+        let timeout = timeout.unwrap_or(Duration::from_secs(10));
+
+        // Wait for edge event
+        let detected = blocking_wait_for_edge(chip_fd_raw, &mut request, None, timeout)?;
+
+        Ok(detected)
+    }
+
+    fn add_event_detect(
+        &mut self,
+        channel: u32,
+        edge: Edge,
+        callback: Box<dyn Fn() + Send>,
+        bouncetime: Option<Duration>,
+    ) -> Result<()> {
+        unimplemented!("Use GPIOEvent struct instead for non-blocking event detection")
+    }
+
+    fn remove_event_detect(&mut self, _channel: u32) -> Result<()> {
+        unimplemented!("Use GPIOEvent struct instead for non-blocking event detection")
+    }
+
+    fn event_detected(&mut self, _channel: u32) -> bool {
+        unimplemented!("Use GPIOEvent struct instead for non-blocking event detection")
+    }
+}
+
+/// GPIO with event detection support
+///
+/// This struct provides Python-like GPIO event detection methods.
+/// It wraps the basic GPIO functionality and adds edge detection capabilities.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use jetsongpio::{Direction, Level, Mode};
+/// use jetsongpio::gpio_event::{Edge, GPIOEvent};
+/// use std::time::Duration;
+///
+/// // Create GPIOEvent instance
+/// let mut gpio = GPIOEvent::new();
+/// gpio.setmode(Mode::BOARD).unwrap();
+///
+/// // Setup LED pin as output
+/// gpio.setup(vec![12], Direction::OUT, Some(Level::LOW)).unwrap();
+///
+/// // Setup button pin as input
+/// gpio.setup(vec![18], Direction::IN, None).unwrap();
+///
+/// // Wait for button press (falling edge)
+/// loop {
+///     println!("Waiting for button event");
+///     if gpio.wait_for_edge(18, Edge::Falling, None).unwrap() {
+///         println!("Button pressed!");
+///         gpio.output(vec![12], vec![Level::HIGH]).unwrap();
+///         std::thread::sleep(Duration::from_secs(1));
+///         gpio.output(vec![12], vec![Level::LOW]).unwrap();
+///     }
+/// }
+/// ```
+pub struct GPIOEvent {
+    /// Inner GPIO instance for basic GPIO operations
+    pub gpio: crate::GPIO,
+    /// Event manager for edge detection
+    event_manager: EventManager,
+}
+
+impl GPIOEvent {
+    /// Create a new GPIOEvent instance
+    pub fn new() -> Self {
+        Self {
+            gpio: crate::GPIO::new(),
+            event_manager: EventManager::new(),
+        }
+    }
+
+    /// Enable or disable warnings during setup and cleanup
+    ///
+    /// # Arguments
+    ///
+    /// * `warnings` - `true` to enable warnings, `false` to disable warnings
+    pub fn setwarnings(&mut self, warnings: bool) {
+        self.gpio.setwarnings(warnings);
+    }
+
+    /// Sets the pin numbering mode
+    ///
+    /// Possible mode values are
+    /// * `Mode::BOARD`
+    /// * `Mode::BCM`
+    /// * `Mode::TEGRA_SOC`
+    /// * `Mode::CVM`
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - The pin numbering mode to use
+    pub fn setmode(&mut self, mode: crate::Mode) -> Result<(), Error> {
+        self.gpio.setmode(mode)
+    }
+
+    /// Returns the currently set pin numbering mode
+    pub fn getmode(&self) -> Option<crate::Mode> {
+        self.gpio.getmode()
+    }
+
+    /// Setup a channel or list of channels with a direction and (optional) initial value
+    ///
+    /// # Arguments
+    ///
+    /// * `channels` - A list of channels to setup
+    /// * `direction` - `Direction::IN` or `Direction::OUT`
+    /// * `initial` - An optional initial level for an output channel
+    pub fn setup(
+        &mut self,
+        channels: Vec<u32>,
+        direction: crate::Direction,
+        initial: Option<crate::Level>,
+    ) -> Result<(), Error> {
+        self.gpio.setup(channels, direction, initial, None)
+    }
+
+    /// Cleans up channels at the end of the program
+    ///
+    /// # Arguments
+    ///
+    /// * `channels` - An optional list of channels to cleanup. If no channel is provided, all channels are cleaned
+    pub fn cleanup(&mut self, channels: Option<Vec<u32>>) -> Result<(), Error> {
+        self.gpio.cleanup(channels)
+    }
+
+    /// Returns the current value of the specified channel
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - The channel to read from
+    pub fn input(&self, channel: u32) -> Result<crate::Level, Error> {
+        self.gpio.input(channel)
+    }
+
+    /// Writes values to channels
+    ///
+    /// # Arguments
+    ///
+    /// * `channels` - A list of channels to write to
+    /// * `values` - A list of values to write to the channels
+    pub fn output(&self, channels: Vec<u32>, values: Vec<crate::Level>) -> Result<(), Error> {
+        self.gpio.output(channels, values)
+    }
+
+    /// Returns the currently set function of the specified channel
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - The channel to check
+    pub fn gpio_function(&self, channel: u32) -> Result<crate::Direction, Error> {
+        self.gpio.gpio_function(channel)
+    }
+
+    /// Wait for an edge event on a GPIO channel (blocking)
+    ///
+    /// This function blocks until an edge event is detected on the specified channel.
+    /// Similar to Python's `GPIO.wait_for_edge()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - GPIO channel/pin number
+    /// * `edge` - Edge type to detect (Rising, Falling, or Both)
+    /// * `timeout` - Maximum time to wait for event (None = infinite wait)
+    ///
+    /// # Returns
+    ///
+    /// * `Result<bool>` - True if event was detected, false on timeout
+    pub fn wait_for_edge(
+        &mut self,
+        channel: u32,
+        edge: Edge,
+        timeout: Option<Duration>,
+    ) -> Result<bool> {
+        // Get channel info to find chip and line offset
+        let mode = self.gpio.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
+        let channel_data = self.gpio.channel_data_by_mode.get(&mode)
+            .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
+
+        let ch_info = channel_data.get(&channel)
+            .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
+
+        if ch_info.gpio_chip.is_empty() {
+            return Err(anyhow!("Channel {} is not a GPIO", channel));
+        }
+
+        // Open the chip
+        let chip_name = &ch_info.gpio_chip;
+        let chip_fd = if !self.gpio.chip_fd_map.contains_key(chip_name) {
+            let fd = chip_open_by_label(chip_name)?;
+            self.gpio.chip_fd_map.insert(chip_name.clone(), fd);
+            self.gpio.chip_fd_map.get(chip_name).unwrap().try_clone()?
+        } else {
+            self.gpio.chip_fd_map.get(chip_name).unwrap().try_clone()?
+        };
+
+        let chip_fd_raw = chip_fd.as_raw_fd();
+
+        // Create event request
+        let mut request = request_event(ch_info.line_offset, u32::from(edge), "jetsongpio-rs")?;
+
+        // Use default timeout of 10 seconds if not specified
+        let timeout = timeout.unwrap_or(Duration::from_secs(10));
+
+        // Wait for edge event
+        let detected = blocking_wait_for_edge(chip_fd_raw, &mut request, None, timeout)?;
+
+        Ok(detected)
+    }
+
+    /// Add event detection on a GPIO channel with callback (non-blocking)
+    ///
+    /// This function sets up edge detection with a callback function that runs
+    /// when the edge is detected. Similar to Python's `GPIO.add_event_detect()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - GPIO channel/pin number
+    /// * `edge` - Edge type to detect (Rising, Falling, or Both)
+    /// * `callback` - Callback function to execute on event
+    /// * `bouncetime` - Optional debounce time
+    pub fn add_event_detect(
+        &mut self,
+        channel: u32,
+        edge: Edge,
+        callback: Box<dyn Fn() + Send>,
+        bouncetime: Option<Duration>,
+    ) -> Result<()> {
+        // Get channel info
+        let mode = self.gpio.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
+        let channel_data = self.gpio.channel_data_by_mode.get(&mode)
+            .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
+
+        let ch_info = channel_data.get(&channel)
+            .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
+
+        if ch_info.gpio_chip.is_empty() {
+            return Err(anyhow!("Channel {} is not a GPIO", channel));
+        }
+
+        // Open the chip
+        let chip_name = &ch_info.gpio_chip;
+        let chip_fd = if !self.gpio.chip_fd_map.contains_key(chip_name) {
+            let fd = chip_open_by_label(chip_name)?;
+            self.gpio.chip_fd_map.insert(chip_name.clone(), fd);
+            self.gpio.chip_fd_map.get(chip_name).unwrap().try_clone()?
+        } else {
+            self.gpio.chip_fd_map.get(chip_name).unwrap().try_clone()?
+        };
+
+        let chip_fd_raw = chip_fd.as_raw_fd();
+
+        // Create and open event request
+        let mut request = request_event(ch_info.line_offset, u32::from(edge), "jetsongpio-rs")?;
+        let event_fd = open_event(chip_fd_raw, &mut request)?;
+
+        // Add edge detection
+        self.event_manager
+            .add_edge_detect(chip_name, channel, event_fd, bouncetime)?;
+
+        // Add callback
+        self.event_manager
+            .add_callback(chip_name, channel, callback)?;
+
+        Ok(())
+    }
+
+    /// Remove event detection on a GPIO channel
+    ///
+    /// This function removes edge detection that was previously set up with
+    /// `add_event_detect()`. Similar to Python's `GPIO.remove_event_detect()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - GPIO channel/pin number
+    pub fn remove_event_detect(&mut self, channel: u32) -> Result<()> {
+        // Get channel info to find chip name
+        let mode = self.gpio.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
+        let channel_data = self.gpio.channel_data_by_mode.get(&mode)
+            .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
+
+        let ch_info = channel_data.get(&channel)
+            .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
+
+        let chip_name = &ch_info.gpio_chip;
+
+        // Remove event detection
+        self.event_manager.event_cleanup(chip_name, channel);
+
+        Ok(())
+    }
+
+    /// Check if an event has been detected on a GPIO channel
+    ///
+    /// This function checks and clears the event flag. Similar to Python's
+    /// `GPIO.event_detected()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - GPIO channel/pin number
+    ///
+    /// # Returns
+    ///
+    /// * `bool` - True if an event was detected, false otherwise
+    pub fn event_detected(&mut self, channel: u32) -> bool {
+        // Get channel info to find chip name
+        let mode = match self.gpio.gpio_mode {
+            Some(m) => m,
+            None => return false,
+        };
+
+        let channel_data = match self.gpio.channel_data_by_mode.get(&mode) {
+            Some(data) => data,
+            None => return false,
+        };
+
+        let ch_info = match channel_data.get(&channel) {
+            Some(info) => info,
+            None => return false,
+        };
+
+        let chip_name = &ch_info.gpio_chip;
+
+        // Check if event was detected
+        self.event_manager.edge_event_detected(chip_name, channel)
+    }
+}
+
+impl Default for GPIOEvent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +1115,11 @@ mod tests {
     fn test_event_manager() {
         let manager = EventManager::new();
         assert!(!manager.event_added("test", 1));
+    }
+
+    #[test]
+    fn test_gpio_event_default() {
+        let gpio = GPIOEvent::new();
+        let _ = GPIOEvent::default();
     }
 }

@@ -23,7 +23,7 @@ pub enum Direction {
     HardPwm = 43,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     BOARD,
     BCM,

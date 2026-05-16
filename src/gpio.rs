@@ -158,17 +158,17 @@ fn check_write_access() -> Result<(), Error> {
 pub struct GPIO {
     pub model: String,
     pub jetson_info: JetsonInfo,
-    channel_data_by_mode: HashMap<Mode, HashMap<u32, ChannelInfo>>,
+    pub channel_data_by_mode: HashMap<Mode, HashMap<u32, ChannelInfo>>,
 
     // # Dictionary objects used as lookup tables for pin to linux gpio mapping
-    channel_data: HashMap<u32, ChannelInfo>,
+    pub channel_data: HashMap<u32, ChannelInfo>,
 
-    gpio_warnings: bool,
-    gpio_mode: Option<Mode>,
-    channel_configuration: HashMap<u32, Direction>,
+    pub gpio_warnings: bool,
+    pub gpio_mode: Option<Mode>,
+    pub channel_configuration: HashMap<u32, Direction>,
 
     // Dictionary used as a lookup table from GPIO chip name to chip fd
-    chip_fd_map: HashMap<String, std::fs::File>,
+    pub chip_fd_map: HashMap<String, std::fs::File>,
 }
 
 impl GPIO {
