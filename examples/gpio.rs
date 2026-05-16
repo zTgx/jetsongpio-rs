@@ -1,4 +1,4 @@
-use jetsongpio::{GPIO, Level, Mode, gpio::Direction};
+use jetsongpio::{Direction, GPIO, Level, Mode};
 use std::thread;
 use std::time::Duration;
 

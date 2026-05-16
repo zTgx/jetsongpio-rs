@@ -117,8 +117,6 @@ impl PullUpDown {
     }
 }
 
-// TODO: Implement GPIO character device API
-// For now, this is a placeholder that will be filled in properly later
 fn check_write_access() -> Result<(), Error> {
     // Check if /dev/gpiochip0 exists (GPIO character device)
     let gpiochip_path = "/dev/gpiochip0";

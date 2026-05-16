@@ -22,8 +22,7 @@
 //!
 //! Press CTRL+C to exit
 
-use jetsongpio::gpio_event::Edge;
-use jetsongpio::{Direction, GPIO, Level, Mode};
+use jetsongpio::{Direction, Edge, GPIO, Level, Mode};
 use std::thread;
 use std::time::Duration;
 

@@ -14,8 +14,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use jetsongpio::{GPIO, Direction, Mode};
-//! use jetsongpio::gpio_event::{Edge, blocking_wait_for_edge, request_event, open_event};
+//! use jetsongpio::{GPIO, Direction, Edge, Mode};
+//! use jetsongpio::gpio_event::{blocking_wait_for_edge, request_event, open_event};
 //! use std::time::Duration;
 //!
 //! let mut gpio = GPIO::new();
@@ -618,8 +618,7 @@ impl crate::GPIO {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use jetsongpio::{GPIO, Direction, Mode};
-    /// use jetsongpio::gpio_event::Edge;
+    /// use jetsongpio::{GPIO, Direction, Edge, Mode};
     /// use std::time::Duration;
     ///
     /// let mut gpio = GPIO::new();
@@ -692,8 +691,7 @@ impl crate::GPIO {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use jetsongpio::{GPIO, Direction, Mode};
-    /// use jetsongpio::gpio_event::Edge;
+    /// use jetsongpio::{GPIO, Direction, Edge, Mode};
     /// use std::time::Duration;
     ///
     /// let mut gpio = GPIO::new();

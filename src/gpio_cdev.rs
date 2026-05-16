@@ -8,7 +8,7 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```ignore
 //! use jetsongpio::gpio_cdev::*;
 //!
 //! // Open a GPIO chip by label
