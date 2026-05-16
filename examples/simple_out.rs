@@ -7,7 +7,7 @@
 //!
 //! # Hardware Setup
 //!
-//! Connect an LED (with appropriate resistor) to pin 18 (BCM mode) and GND.
+//! Connect an LED (with appropriate resistor) to pin 18 (BOARD mode) and GND.
 //!
 //! # Usage
 //!
@@ -23,14 +23,14 @@ use jetsongpio::{Direction, GPIO, Level, Mode};
 use std::thread;
 use std::time::Duration;
 
-const OUTPUT_PIN: u32 = 18; // BCM pin 18
+const OUTPUT_PIN: u32 = 18; // BOARD pin 18
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create GPIO instance
     let mut gpio = GPIO::new();
 
     // Pin Setup:
-    gpio.setmode(Mode::BCM)?; // BCM pin-numbering scheme from Raspberry Pi
+    gpio.setmode(Mode::BOARD)?; // BOARD pin-numbering scheme
     // set pin as an output pin with optional initial state of HIGH
     gpio.setup(vec![OUTPUT_PIN], Direction::OUT, Some(Level::HIGH), None)?;
 

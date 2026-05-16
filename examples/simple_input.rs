@@ -7,7 +7,7 @@
 //!
 //! # Hardware Setup
 //!
-//! Connect a button or switch to pin 18 (BCM mode) and GND.
+//! Connect a button or switch to pin 18 (BOARD mode) and GND.
 //! You may also want to add a pull-up resistor.
 //!
 //! # Usage
@@ -24,7 +24,7 @@ use jetsongpio::{Direction, GPIO, Level, Mode};
 use std::thread;
 use std::time::Duration;
 
-const INPUT_PIN: u32 = 18; // BCM pin 18
+const INPUT_PIN: u32 = 18; // BOARD pin 18
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_value: Option<Level> = None;
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpio = GPIO::new();
 
     // Pin Setup:
-    gpio.setmode(Mode::BCM)?; // BCM pin-numbering scheme from Raspberry Pi
+    gpio.setmode(Mode::BOARD)?; // BOARD pin-numbering scheme
     gpio.setup(vec![INPUT_PIN], Direction::IN, None, None)?; // set pin as an input pin
     println!("Starting demo now! Press CTRL+C to exit");
 

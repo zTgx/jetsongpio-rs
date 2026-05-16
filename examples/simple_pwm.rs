@@ -5,7 +5,7 @@
 //! Demonstrates hardware PWM control on Jetson devices. The duty cycle sweeps
 //! from 0% to 100% and back, creating a breathing LED effect.
 //!
-//! # PWM Pin Mapping (BCM mode)
+//! # PWM Pin Mapping (BOARD mode)
 //!
 //! - JETSON_XAVIER / CLARA_AGX_XAVIER / JETSON_ORIN: 18
 //! - JETSON_NANO / JETSON_NX / JETSON_ORIN_NX / JETSON_ORIN_NANO: 33
@@ -19,8 +19,8 @@
 
 use jetsongpio::{get_model, GPIO, Mode, PWM};
 
-/// Map model name to its PWM-capable BCM pin number.
-fn pwm_bcm_pin(model: &str) -> Option<u32> {
+/// Map model name to its PWM-capable BOARD pin number.
+fn pwm_board_pin(model: &str) -> Option<u32> {
     match model {
         "JETSON_XAVIER" | "CLARA_AGX_XAVIER" | "JETSON_ORIN" => Some(18),
         "JETSON_NANO" | "JETSON_NX" | "JETSON_ORIN_NX" | "JETSON_ORIN_NANO" => Some(33),
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = get_model()?;
     println!("Detected board: {}", model);
 
-    let bcm_pin = match pwm_bcm_pin(&model) {
+    let board_pin = match pwm_board_pin(&model) {
         Some(p) => p,
         None => {
             eprintln!("No PWM pin defined for board: {}", model);
@@ -42,10 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut gpio = GPIO::new();
-    gpio.setmode(Mode::BCM)?;
+    gpio.setmode(Mode::BOARD)?;
 
-    println!("Creating PWM on BCM pin {} at 50 Hz...", bcm_pin);
-    let mut pwm = PWM::new(&mut gpio, bcm_pin, 50.0)?;
+    println!("Creating PWM on BOARD pin {} at 50 Hz...", board_pin);
+    let mut pwm = PWM::new(&mut gpio, board_pin, 50.0)?;
 
     let mut val: f64 = 25.0;
     let incr: f64 = 5.0;
