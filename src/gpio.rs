@@ -631,7 +631,12 @@ fn pwm_export(ch_info: &mut ChannelInfo) -> Result<(), Error> {
     // Wait for enable file to become readable (mirrors Python time.sleep loop)
     let enable_path = pwm_enable_path(ch_info);
     loop {
-        if OpenOptions::new().read(true).write(true).open(&enable_path).is_ok() {
+        if OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&enable_path)
+            .is_ok()
+        {
             break;
         }
         thread::sleep(Duration::from_millis(10));

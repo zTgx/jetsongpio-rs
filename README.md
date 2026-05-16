@@ -1,24 +1,34 @@
 # jetsongpio-rs
 
-A Rust library for controlling GPIO pins on NVIDIA Jetson platforms. This is a Rust implementation of the [Jetson.GPIO](https://github.com/NVIDIA/jetson-gpio) Python library, using the Linux GPIO character device API (`/dev/gpiochipX`).
+A Rust library for controlling GPIO pins on NVIDIA Jetson platforms.
+
+Jetson TX1, TX2, AGX Xavier, Xavier NX, Nano, AGX Orin, Orin NX, Orin Nano, and
+Thor Reference development boards contain a 40 pin GPIO header. These GPIOs can be
+controlled for digital input and output using this library. The API is modeled after
+the [Jetson.GPIO](https://github.com/NVIDIA/jetson-gpio) Python library.
+
+This library uses the Linux GPIO character device API (`/dev/gpiochipX`) and
+does not depend on the deprecated sysfs interface.
 
 ## Supported Platforms
 
 | Model | Status |
 |---|---|
+| Jetson TX1 | Supported |
+| Jetson TX2 | Supported |
+| Jetson TX2 NX | Supported |
+| Clara AGX Xavier | Supported |
+| Jetson AGX Xavier | Supported |
+| Jetson Xavier NX | Supported |
+| Jetson Nano | Supported |
+| Jetson AGX Orin | Supported |
 | Jetson Orin NX | Supported |
 | Jetson Orin Nano | Supported |
-| Jetson AGX Orin | Supported |
-| Jetson Xavier NX | Supported |
-| Jetson AGX Xavier | Supported |
-| Jetson TX2 NX | Supported |
-| Jetson TX2 | Supported |
-| Jetson TX1 | Supported |
-| Jetson Nano | Supported |
-| Clara AGX Xavier | Supported |
 | Jetson Thor Reference | Supported |
 
-Pin definitions are automatically synchronized from the upstream `jetson-gpio` repository via a git submodule and code generation at build time. See the [Data Synchronization](#data-synchronization) section for details.
+Pin definitions are automatically synchronized from the upstream `jetson-gpio`
+repository via a git submodule and code generation at build time. See the
+[Data Synchronization](#data-synchronization) section for details.
 
 ## Features
 
@@ -27,15 +37,41 @@ Pin definitions are automatically synchronized from the upstream `jetson-gpio` r
 - Input and output modes with configurable initial state
 - Hardware PWM output with configurable frequency and duty cycle
 - GPIO event detection (rising, falling, both edges) with epoll-based polling
+- Callback-based interrupt handling with debounce support
 - Pinmux register address lookup
 - Automatic Jetson model detection via device tree
 - CLI tool for quick GPIO operations
+- Compile-time validation of pin data via `build.rs`
 
 ## Requirements
 
 - NVIDIA Jetson platform (aarch64, Linux)
 - Linux kernel with GPIO character device support (`/dev/gpiochipX`)
 - Appropriate permissions for `/dev/gpiochipX` (root, or udev rules)
+
+## Setting User Permissions
+
+In order to use the library without root, the correct user permissions must be
+set first.
+
+Create a new gpio user group and add your user to it:
+
+```shell
+sudo groupadd -f -r gpio
+sudo usermod -a -G gpio your_user_name
+```
+
+Install custom udev rules:
+
+```shell
+sudo cp vendor/jetson-gpio/lib/python/Jetson/GPIO/99-gpio.rules /etc/udev/rules.d/
+```
+
+For the new rule to take place, either reboot or reload the udev rules:
+
+```shell
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
 
 ## Usage
 
@@ -46,116 +82,199 @@ Add the dependency to `Cargo.toml`:
 jetsongpio = "0.1"
 ```
 
-### Basic Setup
+### 1. Pin Numbering
+
+The library provides four ways of numbering the I/O pins:
 
 ```rust
-use jetsongpio::{GPIO, Direction, Level, Mode};
+use jetsongpio::{GPIO, Mode};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut gpio = GPIO::new();
-    gpio.setmode(Mode::BOARD)?;
+let mut gpio = GPIO::new();
 
-    // Setup pin 18 as output, initial LOW
-    gpio.setup(vec![18], Direction::OUT, Some(Level::LOW), None)?;
+// Board pin number (physical pin on the 40-pin header)
+gpio.setmode(Mode::BOARD)?;
 
-    // Set HIGH
-    gpio.output(vec![18], vec![Level::HIGH])?;
+// Broadcom SoC GPIO numbers
+gpio.setmode(Mode::BCM)?;
 
-    // Cleanup
-    gpio.cleanup(None)?;
-    Ok(())
-}
+// CVM/CVB connector signal names
+gpio.setmode(Mode::CVM)?;
+
+// Tegra SoC pin names
+gpio.setmode(Mode::TegraSoc)?;
 ```
 
-### Pin Numbering Modes
-
-Four pin numbering schemes are supported:
+Call `setmode()` before any other GPIO operation. The mode cannot be changed
+once set. To check which mode has been set:
 
 ```rust
-use jetsongpio::Mode;
-
-Mode::BOARD      // Board pin number (physical pin on the 40-pin header)
-Mode::BCM        // BCM mode numbering
-Mode::CVM        // CVM connector name
-Mode::TegraSoc   // Tegra SoC pin name
+let mode = gpio.getmode(); // Returns Option<Mode>
 ```
 
-Call `setmode()` before any other GPIO operation. The mode cannot be changed once set.
+### 2. Warnings
 
-### Digital Output
+It is possible that the GPIO you are trying to use is already being used
+external to the current application. The library will warn you if the GPIO
+being used is configured to anything but the default direction (input). It will
+also warn you if you try cleaning up before setting up the mode and channels.
+
+To disable warnings:
 
 ```rust
-use jetsongpio::{GPIO, Direction, Level, Mode};
+gpio.setwarnings(false);
+```
+
+### 3. Set up a Channel
+
+The GPIO channel must be set up before use as input or output.
+
+To configure a channel as input:
+
+```rust
+use jetsongpio::{GPIO, Direction, Mode};
 
 let mut gpio = GPIO::new();
 gpio.setmode(Mode::BOARD)?;
+gpio.setup(vec![18], Direction::IN, None, None)?;
+```
 
-// Setup multiple pins as output
+To configure a channel as output with an initial value:
+
+```rust
+use jetsongpio::Level;
+
+gpio.setup(vec![18], Direction::OUT, Some(Level::LOW), None)?;
+```
+
+Multiple channels can be set up at once:
+
+```rust
 gpio.setup(vec![7, 11], Direction::OUT, Some(Level::LOW), None)?;
+```
 
-// Write values
+### 4. Input
+
+To read the value of a channel:
+
+```rust
+let value = gpio.input(18)?;
+// Returns Level::LOW or Level::HIGH
+```
+
+### 5. Output
+
+To set the value of pin(s) configured as output:
+
+```rust
+// Single pin
+gpio.output(vec![18], vec![Level::HIGH])?;
+
+// Multiple pins
 gpio.output(vec![7, 11], vec![Level::HIGH, Level::LOW])?;
 ```
 
-### Digital Input
+### 6. Cleanup
+
+At the end of the program, it is good to clean up the channels so that all
+pins are set in their default state.
 
 ```rust
-use jetsongpio::{GPIO, Direction, Mode};
+// Cleanup all channels
+gpio.cleanup(None)?;
 
-let mut gpio = GPIO::new();
-gpio.setmode(Mode::BCM)?;
-
-// Setup pin as input
-gpio.setup(vec![18], Direction::IN, None, None)?;
-
-// Read value
-let value = gpio.input(18)?;
-println!("Pin 18: {:?}", value);
+// Cleanup specific channels
+gpio.cleanup(Some(vec![7, 11]))?;
 ```
 
-### Event Detection
-
-The library supports edge detection using the Linux GPIO event interface backed by epoll:
-
-```rust
-use jetsongpio::{GPIO, Direction, Mode};
-use jetsongpio::gpio_event::Edge;
-
-let mut gpio = GPIO::new();
-gpio.setmode(Mode::BCM)?;
-gpio.setup(vec![18], Direction::IN, None, None)?;
-
-// Blocking wait for falling edge with 5-second timeout
-let detected = gpio.wait_for_edge(18, Edge::Falling, Some(std::time::Duration::from_secs(5)))?;
-if detected {
-    println!("Edge detected!");
-}
-```
-
-### Querying Pin State
+### 7. Check Function of GPIO Channels
 
 ```rust
 let direction = gpio.gpio_function(18)?;
-println!("Pin 18 direction: {:?}", direction);
+// Returns Direction::IN, Direction::OUT, or Direction::HardPwm
 ```
 
-### Hardware PWM
+### 8. Interrupts
 
-The library supports hardware PWM output via the Linux sysfs PWM interface:
+Aside from busy-polling, the library provides additional ways of monitoring an
+input event:
+
+#### `wait_for_edge()`
+
+This function blocks the calling thread until the provided edge is detected:
+
+```rust
+use jetsongpio::{GPIO, Direction, Edge, Mode};
+use std::time::Duration;
+
+let mut gpio = GPIO::new();
+gpio.setmode(Mode::BOARD)?;
+gpio.setup(vec![18], Direction::IN, None, None)?;
+
+// Blocking wait with timeout
+let detected = gpio.wait_for_edge(18, Edge::Falling, Some(Duration::from_secs(5)))?;
+```
+
+The edge parameter can be `Edge::Rising`, `Edge::Falling`, or `Edge::Both`.
+
+#### `event_detected()`
+
+This function can be used to periodically check if an event occurred since the
+last call:
+
+```rust
+gpio.add_event_detect(18, Edge::Rising, None, None)?;
+
+// ... in your main loop ...
+if gpio.event_detected(18)? {
+    println!("Event detected on pin 18!");
+}
+```
+
+#### Callback function
+
+A callback function can be run when an edge is detected, concurrent to the main
+program:
+
+```rust
+gpio.add_event_detect(
+    18,
+    Edge::Falling,
+    Some(Box::new(|| println!("Button pressed!"))),
+    Some(Duration::from_millis(200)), // debounce
+)?;
+```
+
+To remove event detection:
+
+```rust
+gpio.remove_event_detect(18)?;
+```
+
+### 9. Hardware PWM
+
+The library supports hardware PWM output via the Linux sysfs PWM interface.
+Only pins with attached hardware PWM controllers are supported. Jetson Nano
+supports 2 PWM channels, Jetson AGX Xavier supports 3 PWM channels. Jetson TX1
+and TX2 do not support any PWM channels.
+
+The system pinmux must be configured to connect the hardware PWM controller(s)
+to the relevant pins. If the pinmux is not configured, PWM signals will not
+reach the pins! The library does not dynamically modify the pinmux configuration.
+Read the L4T documentation for details on how to configure the pinmux.
 
 ```rust
 use jetsongpio::{GPIO, Mode, PWM};
 
 let mut gpio = GPIO::new();
-gpio.setmode(Mode::BCM)?;
+gpio.setmode(Mode::BOARD)?;
 
-// Create PWM on BCM pin 18 at 50 Hz
+// Create PWM on pin 18 at 50 Hz
 let mut pwm = PWM::new(&mut gpio, 18, 50.0)?;
 
 // Start with 25% duty cycle
 pwm.start(25.0)?;
 
-// Change duty cycle
+// Change duty cycle (0.0 - 100.0)
 pwm.set_duty_cycle(50.0)?;
 
 // Change frequency
@@ -165,36 +284,26 @@ pwm.set_frequency(100.0)?;
 pwm.stop()?;
 ```
 
-PWM-capable pins vary by model (BCM numbering):
-- Jetson AGX Xavier / Clara AGX Xavier / Jetson AGX Orin: pin 18
-- Jetson Nano / Jetson Xavier NX / Jetson Orin NX / Jetson Orin Nano: pin 33
-- Jetson TX2 NX: pin 32
+PWM-capable pins vary by model:
 
-### Cleanup
-
-Always call `cleanup()` before exiting to release GPIO lines:
-
-```rust
-// Cleanup specific pins
-gpio.cleanup(Some(vec![7, 11]))?;
-
-// Cleanup all configured pins
-gpio.cleanup(None)?;
-```
+| Model | BOARD Pin |
+|---|---|
+| Jetson AGX Xavier / Clara AGX Xavier / Jetson AGX Orin | 18 |
+| Jetson Nano / Jetson Xavier NX / Jetson Orin NX / Jetson Orin Nano | 33 |
+| Jetson TX2 NX | 32 |
 
 ## CLI Tool
 
-The library includes a command-line tool for quick GPIO operations. Build and install with:
+The library includes a command-line tool for quick GPIO operations. Install with:
 
 ```bash
-cargo build --release
-sudo ./target/release/jetsongpio <command>
+cargo install jetsongpio
 ```
 
 ### Commands
 
 ```
-jetsongpio pinmux-lookup <PIN>     Look up pinmux register address (BOARD pin number)
+jetsongpio pinmux-lookup <PIN>     Look up pinmux register address (BOARD pin)
 jetsongpio high <PIN>              Set pin HIGH (auto-setup as output)
 jetsongpio low <PIN>               Set pin LOW (auto-setup as output)
 jetsongpio setup <PIN>             Setup pin direction and optional initial value
@@ -210,51 +319,64 @@ All pin numbers in the CLI use BOARD mode.
 ### Examples
 
 ```bash
-# Look up pinmux register address for board pin 7
 jetsongpio pinmux-lookup 7
-
-# Set board pin 18 to HIGH
 jetsongpio high 18
-
-# Read board pin 12
 jetsongpio read 12
-
-# Setup board pin 13 as output with initial LOW
 jetsongpio setup 13 --direction out --initial low
-
-# Cleanup all pins
 jetsongpio cleanup
 ```
 
 ## Examples
 
-The `examples/` directory contains complete example programs:
+The `examples/` directory contains complete example programs. All examples use
+BOARD pin numbering mode.
 
 ```bash
-# Toggle an LED on BCM pin 18
+# Toggle an LED on pin 18
 cargo run --example simple_out
 
-# Read a button on BCM pin 18
+# Read a button on pin 18
 cargo run --example simple_input
 
-# Button interrupt via edge detection
-cargo run --example button_interrupt
-
-# Button event detection (blocking mode)
+# Button press with blocking wait (LED on pin 12)
 cargo run --example button_event
+
+# Button interrupt via edge callback (LEDs on pin 12 and 13)
+cargo run --example button_interrupt
 
 # Hardware PWM breathing LED
 cargo run --example simple_pwm
 
-# GPIO output toggle on BOARD pin 29
+# GPIO output toggle on pin 29
 cargo run --example gpio
 ```
 
+## Environment Variables
+
+The library supports two environment variables for model detection:
+
+- **`JETSON_TESTING_MODEL_NAME`** — Takes precedence over device tree detection.
+  Useful for testing on non-Jetson hosts. Value must be a valid model constant
+  (e.g. `JETSON_ORIN_NX`).
+
+- **`JETSON_MODEL_NAME`** — Used as a fallback when `/proc/device-tree/compatible`
+  is not available (e.g. Docker containers). Same format.
+
+Valid model names: `JETSON_TX1`, `JETSON_TX2`, `JETSON_TX2_NX`,
+`CLARA_AGX_XAVIER`, `JETSON_XAVIER`, `JETSON_NANO`, `JETSON_NX`,
+`JETSON_ORIN`, `JETSON_ORIN_NX`, `JETSON_ORIN_NANO`,
+`JETSON_THOR_REFERENCE`.
+
 ## Data Synchronization
 
-Pin definitions, compatibility strings, and board metadata are sourced from the upstream [NVIDIA/jetson-gpio](https://github.com/NVIDIA/jetson-gpio) Python library. The `vendor/jetson-gpio` directory is a git submodule pointing to that repository.
+Pin definitions, compatibility strings, and board metadata are sourced from the
+upstream [NVIDIA/jetson-gpio](https://github.com/NVIDIA/jetson-gpio) Python
+library. The `vendor/jetson-gpio` directory is a git submodule pointing to that
+repository.
 
-During `cargo build`, `build.rs` parses `vendor/jetson-gpio/lib/python/Jetson/GPIO/gpio_pin_data.py` and generates Rust code into `OUT_DIR`. This includes:
+During `cargo build`, `build.rs` parses
+`vendor/jetson-gpio/lib/python/Jetson/GPIO/gpio_pin_data.py` and generates
+Rust code into `OUT_DIR`. This includes:
 
 - Model constants (`JETSON_ORIN_NX`, `JETSON_NANO`, etc.)
 - `get_jetson_models()` -- list of all supported models
@@ -271,7 +393,8 @@ cd ../..
 cargo build
 ```
 
-Pin data is regenerated automatically whenever the Python source file changes (tracked via `cargo:rerun-if-changed`).
+Pin data is regenerated automatically whenever the Python source file changes
+(tracked via `cargo:rerun-if-changed`).
 
 ## License
 

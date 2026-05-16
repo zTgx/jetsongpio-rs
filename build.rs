@@ -3,8 +3,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-const PYTHON_PIN_DATA_PATH: &str =
-    "vendor/jetson-gpio/lib/python/Jetson/GPIO/gpio_pin_data.py";
+const PYTHON_PIN_DATA_PATH: &str = "vendor/jetson-gpio/lib/python/Jetson/GPIO/gpio_pin_data.py";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -255,9 +254,7 @@ fn generate_rust_code(python_content: &str) -> String {
     }
 
     // No default fallback — unknown model is a bug, fail at runtime
-    out.push_str(
-        "        _ => panic!(\"get_jetson_data: unknown Jetson model: {}\", model),\n",
-    );
+    out.push_str("        _ => panic!(\"get_jetson_data: unknown Jetson model: {}\", model),\n");
 
     out.push_str("    }\n}\n");
     out
@@ -297,7 +294,7 @@ fn parse_python_file(content: &str) -> ParsedPython {
     let mut pin_defs_map: HashMap<String, Vec<PinDef>> = HashMap::new();
     let mut current_array: Option<String> = None;
     let mut bracket_depth: i32 = 0;
-    let mut tuple_buf = String::new();   // accumulates multi-line tuples
+    let mut tuple_buf = String::new(); // accumulates multi-line tuples
     let mut in_tuple = false;
     let mut tuple_paren_depth: i32 = 0;
 
@@ -420,10 +417,7 @@ fn parse_python_file(content: &str) -> ParsedPython {
                         .as_str()
                         .parse()
                         .unwrap_or_else(|_| {
-                            panic!(
-                                "build.rs: failed to parse bcm_pin as u32 in: {}",
-                                tuple_buf
-                            )
+                            panic!("build.rs: failed to parse bcm_pin as u32 in: {}", tuple_buf)
                         });
                     let cvm_pin = caps
                         .get(6)
@@ -435,14 +429,9 @@ fn parse_python_file(content: &str) -> ParsedPython {
                         .expect("pin_re group 7 (tegra_soc_pin)")
                         .as_str()
                         .to_string();
-                    let pwm_chip_dir_str = caps
-                        .get(8)
-                        .expect("pin_re group 8 (pwm_chip_dir)")
-                        .as_str();
-                    let pwm_id_str = caps
-                        .get(9)
-                        .expect("pin_re group 9 (pwm_id)")
-                        .as_str();
+                    let pwm_chip_dir_str =
+                        caps.get(8).expect("pin_re group 8 (pwm_chip_dir)").as_str();
+                    let pwm_id_str = caps.get(9).expect("pin_re group 9 (pwm_id)").as_str();
                     let padctl_str = caps.get(10).map(|m| m.as_str());
 
                     let pwm_chip_dir = if pwm_chip_dir_str == "None" {
@@ -458,21 +447,19 @@ fn parse_python_file(content: &str) -> ParsedPython {
                         None
                     } else {
                         Some(pwm_id_str.parse().unwrap_or_else(|_| {
-                            panic!(
-                                "build.rs: failed to parse pwm_id as u32 in: {}",
-                                tuple_buf
-                            )
+                            panic!("build.rs: failed to parse pwm_id as u32 in: {}", tuple_buf)
                         }))
                     };
                     let padctl_addr = match padctl_str {
                         Some(s) if s != "None" && !s.is_empty() => Some(
-                            u32::from_str_radix(s.trim_start_matches("0x"), 16)
-                                .unwrap_or_else(|_| {
+                            u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or_else(
+                                |_| {
                                     panic!(
                                         "build.rs: failed to parse padctl_addr as hex u32 in: {}",
                                         tuple_buf
                                     )
-                                }),
+                                },
+                            ),
                         ),
                         _ => None,
                     };
@@ -504,8 +491,7 @@ fn parse_python_file(content: &str) -> ParsedPython {
     // ── 3. Parse compat tuples ──────────────────────────────────────────
     let compat_header_re =
         regex::Regex::new(r"^(compats_[a-z0-9_]+)\s*=\s*\(").expect("compat_header_re");
-    let compat_val_re =
-        regex::Regex::new(r#"['"]([^'"]+)['"]"#).expect("compat_val_re");
+    let compat_val_re = regex::Regex::new(r#"['"]([^'"]+)['"]"#).expect("compat_val_re");
     let mut compats_map: HashMap<String, Vec<String>> = HashMap::new();
     let mut current_compat: Option<String> = None;
 
@@ -532,10 +518,7 @@ fn parse_python_file(content: &str) -> ParsedPython {
                 })
                 .collect();
             if let Some(ref name) = current_compat {
-                compats_map
-                    .entry(name.clone())
-                    .or_default()
-                    .extend(vals);
+                compats_map.entry(name.clone()).or_default().extend(vals);
             }
             if trimmed.contains(')') {
                 current_compat = None;
@@ -554,10 +537,7 @@ fn parse_python_file(content: &str) -> ParsedPython {
                 })
                 .collect();
             if let Some(ref name) = current_compat {
-                compats_map
-                    .entry(name.clone())
-                    .or_default()
-                    .extend(vals);
+                compats_map.entry(name.clone()).or_default().extend(vals);
             }
             if trimmed.contains(')') {
                 current_compat = None;
@@ -566,8 +546,8 @@ fn parse_python_file(content: &str) -> ParsedPython {
     }
 
     // ── 4. Parse jetson_gpio_data dict for metadata ─────────────────────
-    let model_entry_re = regex::Regex::new(r"(CLARA_AGX_XAVIER|JETSON_[A-Z0-9_]+):\s*\(")
-        .expect("model_entry_re");
+    let model_entry_re =
+        regex::Regex::new(r"(CLARA_AGX_XAVIER|JETSON_[A-Z0-9_]+):\s*\(").expect("model_entry_re");
     let pin_defs_ref_re =
         regex::Regex::new(r"([A-Z][A-Z0-9_]*_PIN_DEFS)\s*,").expect("pin_defs_ref_re");
     let metadata_field_re =
@@ -575,10 +555,8 @@ fn parse_python_file(content: &str) -> ParsedPython {
     let metadata_field_num_re =
         regex::Regex::new(r"'([A-Z_]+)':\s*(\d+)").expect("metadata_field_num_re");
 
-    let mut model_metadata: HashMap<
-        String,
-        (String, std::collections::HashMap<String, String>),
-    > = HashMap::new();
+    let mut model_metadata: HashMap<String, (String, std::collections::HashMap<String, String>)> =
+        HashMap::new();
     let mut in_gpio_data = false;
     let mut current_model_name: Option<String> = None;
     let mut current_pin_defs_ref: Option<String> = None;
@@ -669,8 +647,14 @@ fn parse_python_file(content: &str) -> ParsedPython {
         if in_metadata_dict {
             for m in metadata_field_re.captures_iter(trimmed) {
                 current_metadata.insert(
-                    m.get(1).expect("metadata_field_re group 1").as_str().to_string(),
-                    m.get(2).expect("metadata_field_re group 2").as_str().to_string(),
+                    m.get(1)
+                        .expect("metadata_field_re group 1")
+                        .as_str()
+                        .to_string(),
+                    m.get(2)
+                        .expect("metadata_field_re group 2")
+                        .as_str()
+                        .to_string(),
                 );
             }
             for m in metadata_field_num_re.captures_iter(trimmed) {
@@ -705,10 +689,7 @@ fn parse_python_file(content: &str) -> ParsedPython {
                 )
             });
 
-        let pin_defs = pin_defs_map
-            .get(&pin_defs_var)
-            .cloned()
-            .unwrap_or_default();
+        let pin_defs = pin_defs_map.get(&pin_defs_var).cloned().unwrap_or_default();
 
         // Find compat variable name for this model via auto-derived mapping
         let compat_var = compat_to_model
@@ -750,7 +731,10 @@ fn parse_python_file(content: &str) -> ParsedPython {
         });
     }
 
-    ParsedPython { models, model_order }
+    ParsedPython {
+        models,
+        model_order,
+    }
 }
 
 /// Parse Python's `get_model()` function body to automatically derive the
@@ -783,14 +767,12 @@ fn parse_compat_model_mapping(content: &str) -> HashMap<String, String> {
     // The compat name and return may be separated by warn_if_not_carrier_board etc.
     // In the Python source, compat names are used as bare variable references:
     //   if matches(compats_tx1):
-    let re = regex::Regex::new(r"\b(compats_[a-z0-9_]+)\b")
-        .expect("compat_call_re");
+    let re = regex::Regex::new(r"\b(compats_[a-z0-9_]+)\b").expect("compat_call_re");
 
     // We walk through the body and maintain a stack: each time we see a
     // compat call, we record it; each time we see a `return MODEL_NAME`,
     // we pop the most recent compat call.
-    let return_re =
-        regex::Regex::new(r"return\s+([A-Z][A-Z0-9_]+)").expect("return_re");
+    let return_re = regex::Regex::new(r"return\s+([A-Z][A-Z0-9_]+)").expect("return_re");
 
     let mut pending_compat: Option<String> = None;
 
@@ -801,7 +783,11 @@ fn parse_compat_model_mapping(content: &str) -> HashMap<String, String> {
         }
 
         if let Some(caps) = re.captures(trimmed) {
-            let compat_name = caps.get(1).expect("compat call group 1").as_str().to_string();
+            let compat_name = caps
+                .get(1)
+                .expect("compat call group 1")
+                .as_str()
+                .to_string();
             pending_compat = Some(compat_name);
         }
 

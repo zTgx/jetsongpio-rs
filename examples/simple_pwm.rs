@@ -17,7 +17,7 @@
 //! cargo run --example simple_pwm
 //! ```
 
-use jetsongpio::{get_model, GPIO, Mode, PWM};
+use jetsongpio::{GPIO, Mode, PWM, get_model};
 
 /// Map model name to its PWM-capable BOARD pin number.
 fn pwm_board_pin(model: &str) -> Option<u32> {
