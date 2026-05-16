@@ -383,12 +383,7 @@ impl GPIO {
 
     fn setup_single_out(&mut self, ch_info: ChannelInfo, initial: Option<Level>, consumer: &str) {
         let initial_value = initial.map(|l| l as u8);
-        self.do_one_channel(
-            ch_info,
-            Direction::OUT.to_cdev(),
-            initial_value,
-            consumer,
-        );
+        self.do_one_channel(ch_info, Direction::OUT.to_cdev(), initial_value, consumer);
     }
 
     fn setup_single_in(&mut self, ch_info: ChannelInfo, consumer: &str) {

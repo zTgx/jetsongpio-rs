@@ -8,7 +8,7 @@ repository = "https://github.com/ztgx/jetsongpio-rs"
 
 [[bin]]
 name = "jetsongpio"
-path = "src/bin/jetsongpio.rs"
+path = "src/main.rs"
 required-features = ["cli"]
 
 [dependencies]

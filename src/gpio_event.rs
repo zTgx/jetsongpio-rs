@@ -30,16 +30,16 @@
 //! ```
 
 use crate::gpio_cdev::{
-    chip_open_by_label, GPIO_GET_LINEEVENT_IOCTL, GPIOEVENT_REQUEST_BOTH_EDGES,
-    GPIOEVENT_REQUEST_FALLING_EDGE, GPIOEVENT_REQUEST_RISING_EDGE, GpioEventData,
-    GpioEventRequest, request_event,
+    GPIO_GET_LINEEVENT_IOCTL, GPIOEVENT_REQUEST_BOTH_EDGES, GPIOEVENT_REQUEST_FALLING_EDGE,
+    GPIOEVENT_REQUEST_RISING_EDGE, GpioEventData, GpioEventRequest, chip_open_by_label,
+    request_event,
 };
-use anyhow::{anyhow, Error, Result};
-use mio::{Events, Interest, Poll, Token};
+use anyhow::{Error, Result, anyhow};
 use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::convert::TryFrom;
+use std::ffi::c_void;
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -186,7 +186,8 @@ impl EventManager {
 
     /// Check if an event is already added for a channel
     fn event_added(&self, chip_name: &str, channel: u32) -> bool {
-        self.event_list.contains_key(&(chip_name.to_string(), channel))
+        self.event_list
+            .contains_key(&(chip_name.to_string(), channel))
     }
 
     /// Add an edge detection event (non-blocking mode with mio/epoll)
@@ -228,7 +229,8 @@ impl EventManager {
             obj.thread_handle = Some(handle);
         }
 
-        self.event_list.insert((chip_name.to_string(), channel), gpio_obj);
+        self.event_list
+            .insert((chip_name.to_string(), channel), gpio_obj);
 
         Ok(())
     }
@@ -336,7 +338,11 @@ fn edge_handler(
     // Clean initial buffer - read any pending events
     let mut initial_buf = vec![0u8; std::mem::size_of::<GpioEventData>()];
     unsafe {
-        libc::read(fd, initial_buf.as_mut_ptr() as *mut c_void, initial_buf.len());
+        libc::read(
+            fd,
+            initial_buf.as_mut_ptr() as *mut c_void,
+            initial_buf.len(),
+        );
     }
 
     // Create Poll instance in this thread
@@ -350,7 +356,10 @@ fn edge_handler(
 
     // Register the file descriptor with mio/epoll
     let mut source = SourceFd(&fd);
-    if let Err(e) = poll.registry().register(&mut source, Token(channel as usize), Interest::READABLE) {
+    if let Err(e) =
+        poll.registry()
+            .register(&mut source, Token(channel as usize), Interest::READABLE)
+    {
         eprintln!("Failed to register fd with Poll: {}", e);
         return;
     }
@@ -375,13 +384,8 @@ fn edge_handler(
                 for _event in &events {
                     // Read event data
                     let mut buf = vec![0u8; std::mem::size_of::<GpioEventData>()];
-                    let result = unsafe {
-                        libc::read(
-                            fd,
-                            buf.as_mut_ptr() as *mut c_void,
-                            buf.len(),
-                        )
-                    };
+                    let result =
+                        unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
 
                     if result < 0 {
                         let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
@@ -454,7 +458,10 @@ pub fn blocking_wait_for_edge(
 
         if result < 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
-            return Err(Error::msg(format!("Opening input line event handle: errno {}", errno)));
+            return Err(Error::msg(format!(
+                "Opening input line event handle: errno {}",
+                errno
+            )));
         }
     }
 
@@ -472,7 +479,8 @@ pub fn blocking_wait_for_edge(
     // Create mio Poll for efficient blocking wait
     let mut poll = Poll::new()?;
     let mut source = SourceFd(&event_fd);
-    poll.registry().register(&mut source, Token(0), Interest::READABLE)?;
+    poll.registry()
+        .register(&mut source, Token(0), Interest::READABLE)?;
 
     let mut events = Events::with_capacity(1);
     let start = Instant::now();
@@ -503,13 +511,8 @@ pub fn blocking_wait_for_edge(
                 for _event in &events {
                     // Read event data
                     let mut buf = vec![0u8; std::mem::size_of::<GpioEventData>()];
-                    let result = unsafe {
-                        libc::read(
-                            event_fd,
-                            buf.as_mut_ptr() as *mut c_void,
-                            buf.len(),
-                        )
-                    };
+                    let result =
+                        unsafe { libc::read(event_fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
 
                     if result < 0 {
                         let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
@@ -574,7 +577,10 @@ pub fn open_event(chip_fd: i32, request: &mut GpioEventRequest) -> Result<i32> {
 
         if result < 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
-            return Err(Error::msg(format!("Opening input line event handle: errno {}", errno)));
+            return Err(Error::msg(format!(
+                "Opening input line event handle: errno {}",
+                errno
+            )));
         }
     }
 
@@ -634,10 +640,13 @@ impl crate::GPIO {
     ) -> Result<bool> {
         // Get channel info to find chip and line offset
         let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
-        let channel_data = self.channel_data_by_mode.get(&mode)
+        let channel_data = self
+            .channel_data_by_mode
+            .get(&mode)
             .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
 
-        let ch_info = channel_data.get(&channel)
+        let ch_info = channel_data
+            .get(&channel)
             .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
 
         if ch_info.gpio_chip.is_empty() {
@@ -712,10 +721,13 @@ impl crate::GPIO {
     ) -> Result<()> {
         // Get channel info
         let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
-        let channel_data = self.channel_data_by_mode.get(&mode)
+        let channel_data = self
+            .channel_data_by_mode
+            .get(&mode)
             .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
 
-        let ch_info = channel_data.get(&channel)
+        let ch_info = channel_data
+            .get(&channel)
             .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
 
         if ch_info.gpio_chip.is_empty() {
@@ -769,10 +781,13 @@ impl crate::GPIO {
     pub fn remove_event_detect(&mut self, channel: u32) -> Result<()> {
         // Get channel info to find chip name
         let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
-        let channel_data = self.channel_data_by_mode.get(&mode)
+        let channel_data = self
+            .channel_data_by_mode
+            .get(&mode)
             .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
 
-        let ch_info = channel_data.get(&channel)
+        let ch_info = channel_data
+            .get(&channel)
             .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
 
         let chip_name = &ch_info.gpio_chip;
@@ -836,9 +851,18 @@ mod tests {
         assert_eq!(u32::from(Edge::Both), GPIOEVENT_REQUEST_BOTH_EDGES);
         assert_eq!(u32::from(Edge::None), 0);
 
-        assert_eq!(Edge::try_from(GPIOEVENT_REQUEST_RISING_EDGE).unwrap(), Edge::Rising);
-        assert_eq!(Edge::try_from(GPIOEVENT_REQUEST_FALLING_EDGE).unwrap(), Edge::Falling);
-        assert_eq!(Edge::try_from(GPIOEVENT_REQUEST_BOTH_EDGES).unwrap(), Edge::Both);
+        assert_eq!(
+            Edge::try_from(GPIOEVENT_REQUEST_RISING_EDGE).unwrap(),
+            Edge::Rising
+        );
+        assert_eq!(
+            Edge::try_from(GPIOEVENT_REQUEST_FALLING_EDGE).unwrap(),
+            Edge::Falling
+        );
+        assert_eq!(
+            Edge::try_from(GPIOEVENT_REQUEST_BOTH_EDGES).unwrap(),
+            Edge::Both
+        );
         assert_eq!(Edge::try_from(0).unwrap(), Edge::None);
 
         // Test invalid flag

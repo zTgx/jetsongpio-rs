@@ -22,12 +22,12 @@
 //!
 //! Press CTRL+C to exit
 
-use jetsongpio::{Direction, GPIO, Level, Mode};
 use jetsongpio::gpio_event::Edge;
+use jetsongpio::{Direction, GPIO, Level, Mode};
 use std::thread;
 use std::time::Duration;
 
-const LED_PIN: u32 = 12;  // Board pin 12
+const LED_PIN: u32 = 12; // Board pin 12
 const BUTTON_PIN: u32 = 18; // Board pin 18
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,5 +1,5 @@
 use crate::gpio::{Direction, GPIO, Level};
-use crate::gpio_pin_data::{get_jetson_data, get_model, GpioPin, Mode};
+use crate::gpio_pin_data::{GpioPin, Mode, get_jetson_data, get_model};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fmt;
 
@@ -162,7 +162,14 @@ fn run_setup(pin: u32, direction: DirectionArg, initial: Option<LevelArg>) -> Re
     gpio.setmode(Mode::BOARD)?;
     let initial_level = initial.map(|l| l.into());
     gpio.setup(vec![pin], direction.into(), initial_level, None)?;
-    println!("GPIO Pin {} setup as {:?}{}", pin, direction, initial.map(|l| format!(" with initial {:?}", l)).unwrap_or_default());
+    println!(
+        "GPIO Pin {} setup as {:?}{}",
+        pin,
+        direction,
+        initial
+            .map(|l| format!(" with initial {:?}", l))
+            .unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -220,7 +227,11 @@ pub fn run() {
                 std::process::exit(1);
             }
         }
-        Commands::Setup { pin, direction, initial } => {
+        Commands::Setup {
+            pin,
+            direction,
+            initial,
+        } => {
             if let Err(e) = run_setup(pin, direction, initial) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);

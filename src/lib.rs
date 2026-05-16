@@ -14,8 +14,10 @@ pub mod gpio_pin_data;
 pub mod gpio_event;
 
 pub use gpio::{Direction, GPIO, Level};
+pub use gpio_event::{
+    Edge, EventManager, InvalidEventFlagError, blocking_wait_for_edge, open_event,
+};
 pub use gpio_pin_data::*;
-pub use gpio_event::{Edge, EventManager, InvalidEventFlagError, blocking_wait_for_edge, open_event};
 
 #[cfg(feature = "cli")]
 pub mod cli;
