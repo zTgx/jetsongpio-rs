@@ -1,8 +1,10 @@
 use crate::gpio_cdev::*;
 use crate::gpio_pin_data::{ChannelInfo, JetsonInfo, Mode, get_data};
 use anyhow::Error;
+use std::fs::File;
+use std::io::{Read, Seek, Write};
 use std::os::fd::AsRawFd;
-use std::{collections::HashMap, fs::OpenOptions, path::Path};
+use std::{collections::HashMap, fs::OpenOptions, path::Path, thread, time::Duration};
 
 // GPIO character device constants
 const GPIOHANDLE_REQUEST_INPUT: u32 = 0x1;
@@ -353,14 +355,18 @@ impl GPIO {
     }
 
     fn cleanup_one(&mut self, ch_info: ChannelInfo) {
-        // Close the line handle
-        if let Some(line_handle) = ch_info.line_handle {
-            let _ = close_line(Some(line_handle));
+        let app_cfg = self.channel_configuration.get(&ch_info.channel).copied();
+        match app_cfg {
+            Some(Direction::HardPwm) => {
+                pwm_disable(&ch_info).ok();
+                pwm_unexport(&ch_info).ok();
+            }
+            _ => {
+                if let Some(line_handle) = ch_info.line_handle {
+                    let _ = close_line(Some(line_handle));
+                }
+            }
         }
-
-        // Clean up event detection if needed (future)
-        // event::event_cleanup(ch_info.gpio_chip, ch_info.channel);
-
         self.channel_configuration.remove(&ch_info.channel);
     }
 
@@ -581,5 +587,255 @@ impl GPIO {
         let ch_info = self.channel_to_info(channel, false, false)?;
         let func = self.app_channel_configuration(ch_info);
         Ok(func.unwrap_or(Direction::UNKNOWN))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PWM sysfs helpers (private, mirror Python gpio.py:136-210)
+// ---------------------------------------------------------------------------
+
+fn pwm_path(ch_info: &ChannelInfo) -> String {
+    format!(
+        "{}/pwm{}",
+        ch_info.pwm_chip_dir.as_deref().unwrap_or(""),
+        ch_info.pwm_id.unwrap_or(0)
+    )
+}
+
+fn pwm_export_path(ch_info: &ChannelInfo) -> String {
+    format!("{}/export", ch_info.pwm_chip_dir.as_deref().unwrap_or(""))
+}
+
+fn pwm_unexport_path(ch_info: &ChannelInfo) -> String {
+    format!("{}/unexport", ch_info.pwm_chip_dir.as_deref().unwrap_or(""))
+}
+
+fn pwm_period_path(ch_info: &ChannelInfo) -> String {
+    format!("{}/period", pwm_path(ch_info))
+}
+
+fn pwm_duty_cycle_path(ch_info: &ChannelInfo) -> String {
+    format!("{}/duty_cycle", pwm_path(ch_info))
+}
+
+fn pwm_enable_path(ch_info: &ChannelInfo) -> String {
+    format!("{}/enable", pwm_path(ch_info))
+}
+
+fn pwm_export(ch_info: &mut ChannelInfo) -> Result<(), Error> {
+    let pwm_dir = pwm_path(ch_info);
+    if !Path::new(&pwm_dir).exists() {
+        let export_path = pwm_export_path(ch_info);
+        let mut f = OpenOptions::new().write(true).open(&export_path)?;
+        write!(f, "{}", ch_info.pwm_id.unwrap_or(0))?;
+    }
+
+    // Wait for enable file to become readable (mirrors Python time.sleep loop)
+    let enable_path = pwm_enable_path(ch_info);
+    loop {
+        if OpenOptions::new().read(true).write(true).open(&enable_path).is_ok() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let duty_path = pwm_duty_cycle_path(ch_info);
+    let f_duty = OpenOptions::new().read(true).write(true).open(&duty_path)?;
+    ch_info.f_duty_cycle = Some(f_duty);
+
+    Ok(())
+}
+
+fn pwm_unexport(ch_info: &ChannelInfo) -> Result<(), Error> {
+    let unexport_path = pwm_unexport_path(ch_info);
+    let mut f = OpenOptions::new().write(true).open(&unexport_path)?;
+    write!(f, "{}", ch_info.pwm_id.unwrap_or(0))?;
+    Ok(())
+}
+
+fn pwm_set_period(ch_info: &ChannelInfo, period_ns: u64) -> Result<(), Error> {
+    let path = pwm_period_path(ch_info);
+    let mut f = OpenOptions::new().write(true).open(&path)?;
+    write!(f, "{}", period_ns)?;
+    Ok(())
+}
+
+fn pwm_set_duty_cycle(f_duty: &mut File, duty_cycle_ns: u64) -> Result<(), Error> {
+    // On boot, both period and duty cycle are 0. When period==0, any
+    // configuration change is rejected. Only skip the write for duty_cycle==0
+    // if the current value is already 0.
+    if duty_cycle_ns == 0 {
+        f_duty.rewind()?;
+        let mut cur = String::new();
+        f_duty.read_to_string(&mut cur)?;
+        if cur.trim() == "0" {
+            return Ok(());
+        }
+    }
+    f_duty.rewind()?;
+    write!(f_duty, "{}", duty_cycle_ns)?;
+    f_duty.flush()?;
+    Ok(())
+}
+
+fn pwm_enable(ch_info: &ChannelInfo) -> Result<(), Error> {
+    let path = pwm_enable_path(ch_info);
+    let mut f = OpenOptions::new().write(true).open(&path)?;
+    write!(f, "1")?;
+    Ok(())
+}
+
+fn pwm_disable(ch_info: &ChannelInfo) -> Result<(), Error> {
+    let path = pwm_enable_path(ch_info);
+    let mut f = OpenOptions::new().write(true).open(&path)?;
+    write!(f, "0")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PWM struct (mirrors Python gpio.py:542-624)
+// ---------------------------------------------------------------------------
+
+/// Hardware PWM controller for a GPIO channel.
+///
+/// # Example
+///
+/// ```rust
+/// use jetsongpio::{GPIO, Mode, PWM};
+///
+/// let mut gpio = GPIO::new();
+/// gpio.setmode(Mode::BCM).unwrap();
+/// let mut pwm = PWM::new(&mut gpio, 18, 50.0).unwrap();
+/// pwm.start(25.0).unwrap();
+/// // ... change duty cycle ...
+/// pwm.stop().unwrap();
+/// gpio.cleanup(Some(vec![18])).unwrap();
+/// ```
+pub struct PWM {
+    ch_info: ChannelInfo,
+    frequency_hz: f64,
+    duty_cycle_percent: f64,
+    period_ns: u64,
+    duty_cycle_ns: u64,
+    started: bool,
+}
+
+impl PWM {
+    /// Create a new PWM instance for the given channel and frequency.
+    ///
+    /// # Arguments
+    ///
+    /// * `gpio` - The GPIO instance (must have mode set)
+    /// * `channel` - The channel number in the current pin numbering mode
+    /// * `frequency_hz` - The PWM frequency in Hz
+    pub fn new(gpio: &mut GPIO, channel: u32, frequency_hz: f64) -> Result<Self, Error> {
+        gpio.validate_mode_set()?;
+
+        let ch_info = gpio.channel_to_info_lookup(channel, false, true)?;
+        let mut ch_info = ch_info.clone();
+
+        // Check existing configuration
+        let app_cfg = gpio.app_channel_configuration(&ch_info);
+        if app_cfg == Some(Direction::HardPwm) {
+            return Err(Error::msg("Can't create duplicate PWM objects"));
+        }
+        // If channel is set up as GPIO, clean it up first
+        if app_cfg == Some(Direction::OUT) || app_cfg == Some(Direction::IN) {
+            gpio.cleanup(Some(vec![channel]))?;
+        }
+
+        // Export the PWM
+        pwm_export(&mut ch_info)?;
+
+        // Set initial duty cycle to 0
+        if let Some(ref mut f_duty) = ch_info.f_duty_cycle {
+            pwm_set_duty_cycle(f_duty, 0)?;
+        }
+
+        // Anything that doesn't match new frequency_hz
+        let mut pwm = PWM {
+            ch_info,
+            frequency_hz: -frequency_hz,
+            duty_cycle_percent: 0.0,
+            period_ns: 0,
+            duty_cycle_ns: 0,
+            started: false,
+        };
+        pwm.reconfigure(frequency_hz, 0.0, false)?;
+
+        gpio.channel_configuration
+            .insert(channel, Direction::HardPwm);
+
+        Ok(pwm)
+    }
+
+    /// Start PWM output with the given duty cycle percentage (0.0 - 100.0).
+    pub fn start(&mut self, duty_cycle_percent: f64) -> Result<(), Error> {
+        self.reconfigure(self.frequency_hz, duty_cycle_percent, true)
+    }
+
+    /// Stop PWM output.
+    pub fn stop(&mut self) -> Result<(), Error> {
+        if !self.started {
+            return Ok(());
+        }
+        pwm_disable(&self.ch_info)?;
+        self.started = false;
+        Ok(())
+    }
+
+    /// Change the duty cycle percentage (0.0 - 100.0).
+    pub fn set_duty_cycle(&mut self, duty_cycle_percent: f64) -> Result<(), Error> {
+        self.reconfigure(self.frequency_hz, duty_cycle_percent, false)
+    }
+
+    /// Change the frequency in Hz.
+    pub fn set_frequency(&mut self, frequency_hz: f64) -> Result<(), Error> {
+        self.reconfigure(frequency_hz, self.duty_cycle_percent, false)
+    }
+
+    fn reconfigure(
+        &mut self,
+        frequency_hz: f64,
+        duty_cycle_percent: f64,
+        start: bool,
+    ) -> Result<(), Error> {
+        if !(0.0..=100.0).contains(&duty_cycle_percent) {
+            return Err(Error::msg(
+                "duty_cycle_percent must be between 0.0 and 100.0",
+            ));
+        }
+
+        let freq_change = start || (frequency_hz != self.frequency_hz);
+        let stop = self.started && freq_change;
+
+        if stop {
+            self.started = false;
+            pwm_disable(&self.ch_info)?;
+        }
+
+        if freq_change {
+            self.frequency_hz = frequency_hz;
+            self.period_ns = (1_000_000_000.0 / frequency_hz) as u64;
+            // Reset duty cycle before setting period (previous duty may exceed new period)
+            if let Some(ref mut f_duty) = self.ch_info.f_duty_cycle {
+                pwm_set_duty_cycle(f_duty, 0)?;
+            }
+            pwm_set_period(&self.ch_info, self.period_ns)?;
+        }
+
+        self.duty_cycle_percent = duty_cycle_percent;
+        self.duty_cycle_ns = (self.period_ns as f64 * (duty_cycle_percent / 100.0)) as u64;
+
+        if let Some(ref mut f_duty) = self.ch_info.f_duty_cycle {
+            pwm_set_duty_cycle(f_duty, self.duty_cycle_ns)?;
+        }
+
+        if stop || start {
+            pwm_enable(&self.ch_info)?;
+            self.started = true;
+        }
+
+        Ok(())
     }
 }

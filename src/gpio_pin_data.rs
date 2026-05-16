@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::fs;
+use std::io::Read;
+use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChannelInfo {
     pub channel: u32,
     pub chip_fd: Option<i32>,
@@ -14,9 +17,30 @@ pub struct ChannelInfo {
     pub pwm_chip_dir: Option<String>,
     pub pwm_id: Option<u32>,
     pub reg_addr: Option<u32>,
+    pub f_duty_cycle: Option<fs::File>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl Clone for ChannelInfo {
+    fn clone(&self) -> Self {
+        ChannelInfo {
+            channel: self.channel,
+            chip_fd: self.chip_fd,
+            line_handle: self.line_handle,
+            line_offset: self.line_offset,
+            direction: self.direction,
+            edge: self.edge.clone(),
+            consumer: self.consumer.clone(),
+            gpio_name: self.gpio_name.clone(),
+            gpio_chip: self.gpio_chip.clone(),
+            pwm_chip_dir: self.pwm_chip_dir.clone(),
+            pwm_id: self.pwm_id,
+            reg_addr: self.reg_addr,
+            f_duty_cycle: None, // File is not Clone; cloned instances have no fd
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Direction {
     IN = 0,
     OUT = 1,
@@ -101,116 +125,53 @@ impl GpioPin {
 // Include auto-generated data (model constants, pin defs, compat strings, get_jetson_data)
 include!(concat!(env!("OUT_DIR"), "/gpio_pin_data_generated.rs"));
 
-pub fn get_data() -> (String, JetsonInfo, HashMap<Mode, HashMap<u32, ChannelInfo>>) {
-    let model = get_model().unwrap();
-    let (pin_defs, jetson_info) = get_jetson_data(&model);
-    let mut all_modes = HashMap::new();
+/// Resolve raw PWM chip names (e.g. "3280000.pwm") to full sysfs pwmchip paths.
+/// Mirrors Python's gpio_pin_data.py get_data() pwm_dirs resolution logic.
+fn resolve_pwm_chip_dirs(pin_defs: &[GpioPin]) -> HashMap<String, String> {
+    let sysfs_prefixes = [
+        "/sys/devices/",
+        "/sys/devices/platform/",
+        "/sys/bus/platform/devices/",
+    ];
+    let mut pwm_dirs: HashMap<String, String> = HashMap::new();
 
-    let board_channels: HashMap<u32, ChannelInfo> = pin_defs
+    let pwm_chip_names: std::collections::HashSet<&str> = pin_defs
         .iter()
-        .map(|pin| {
-            (
-                pin.board_pin,
-                ChannelInfo {
-                    channel: pin.board_pin,
-                    chip_fd: None,
-                    line_handle: None,
-                    line_offset: pin.linux_gpio,
-                    direction: None,
-                    edge: None,
-                    consumer: "Jetson-gpio".to_string(),
-                    gpio_name: pin.gpio_name.clone(),
-                    gpio_chip: pin.gpio_chip.clone(),
-                    pwm_chip_dir: pin.pwm_chip_sysfs_dir.clone(),
-                    pwm_id: pin.pwm_id,
-                    reg_addr: pin.padctl_addr,
-                },
-            )
-        })
+        .filter_map(|p| p.pwm_chip_sysfs_dir.as_deref())
         .collect();
 
-    let bcm_channels: HashMap<u32, ChannelInfo> = pin_defs
-        .iter()
-        .map(|pin| {
-            (
-                pin.bcm_pin,
-                ChannelInfo {
-                    channel: pin.bcm_pin,
-                    chip_fd: None,
-                    line_handle: None,
-                    line_offset: pin.linux_gpio,
-                    direction: None,
-                    edge: None,
-                    consumer: "Jetson-gpio".to_string(),
-                    gpio_name: pin.gpio_name.clone(),
-                    gpio_chip: pin.gpio_chip.clone(),
-                    pwm_chip_dir: pin.pwm_chip_sysfs_dir.clone(),
-                    pwm_id: pin.pwm_id,
-                    reg_addr: pin.padctl_addr,
-                },
-            )
-        })
-        .collect();
-
-    let cvm_channels: HashMap<u32, ChannelInfo> = pin_defs
-        .iter()
-        .map(|pin| {
-            let key = hash_string(&pin.cvm_pin) as u32;
-            (
-                key,
-                ChannelInfo {
-                    channel: key,
-                    chip_fd: None,
-                    line_handle: None,
-                    line_offset: pin.linux_gpio,
-                    direction: None,
-                    edge: None,
-                    consumer: "Jetson-gpio".to_string(),
-                    gpio_name: pin.gpio_name.clone(),
-                    gpio_chip: pin.gpio_chip.clone(),
-                    pwm_chip_dir: pin.pwm_chip_sysfs_dir.clone(),
-                    pwm_id: pin.pwm_id,
-                    reg_addr: pin.padctl_addr,
-                },
-            )
-        })
-        .collect();
-
-    let tegra_soc_channels: HashMap<u32, ChannelInfo> = pin_defs
-        .iter()
-        .map(|pin| {
-            let key = hash_string(&pin.tegra_soc_pin) as u32;
-            (
-                key,
-                ChannelInfo {
-                    channel: key,
-                    chip_fd: None,
-                    line_handle: None,
-                    line_offset: pin.linux_gpio,
-                    direction: None,
-                    edge: None,
-                    consumer: "Jetson-gpio".to_string(),
-                    gpio_name: pin.gpio_name.clone(),
-                    gpio_chip: pin.gpio_chip.clone(),
-                    pwm_chip_dir: pin.pwm_chip_sysfs_dir.clone(),
-                    pwm_id: pin.pwm_id,
-                    reg_addr: pin.padctl_addr,
-                },
-            )
-        })
-        .collect();
-
-    all_modes.insert(Mode::BOARD, board_channels);
-    all_modes.insert(Mode::BCM, bcm_channels);
-    all_modes.insert(Mode::CVM, cvm_channels);
-    all_modes.insert(Mode::TegraSoc, tegra_soc_channels);
-
-    (model, jetson_info, all_modes)
+    for pwm_chip_name in &pwm_chip_names {
+        let mut pwm_chip_dir = None;
+        for prefix in &sysfs_prefixes {
+            let d = format!("{}{}", prefix, pwm_chip_name);
+            if Path::new(&d).is_dir() {
+                pwm_chip_dir = Some(d);
+                break;
+            }
+        }
+        let Some(pwm_chip_dir) = pwm_chip_dir else {
+            continue;
+        };
+        let pwm_chip_pwm_dir = format!("{}/pwm", pwm_chip_dir);
+        if !Path::new(&pwm_chip_pwm_dir).exists() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(&pwm_chip_pwm_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("pwmchip") {
+                    pwm_dirs.insert(
+                        pwm_chip_name.to_string(),
+                        format!("{}/{}", pwm_chip_pwm_dir, name_str),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    pwm_dirs
 }
-
-use std::fs;
-use std::io::Read;
-use std::path::Path;
 
 fn get_compatibles(path: &str) -> Result<Vec<String>, String> {
     let mut file = fs::File::open(path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
@@ -251,24 +212,19 @@ pub fn get_model() -> Result<String, String> {
         if matches_any(&compatibles, &get_compats_tx1()) {
             warn_if_not_carrier_board(&["2597"])?;
             return Ok(JETSON_TX1.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_tx2()) {
+        } else if matches_any(&compatibles, &get_compats_tx2()) {
             warn_if_not_carrier_board(&["2597"])?;
             return Ok(JETSON_TX2.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_clara_agx_xavier()) {
+        } else if matches_any(&compatibles, &get_compats_clara_agx_xavier()) {
             warn_if_not_carrier_board(&["3900"])?;
             return Ok(CLARA_AGX_XAVIER.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_tx2_nx()) {
+        } else if matches_any(&compatibles, &get_compats_tx2_nx()) {
             warn_if_not_carrier_board(&["3509"])?;
             return Ok(JETSON_TX2_NX.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_xavier()) {
+        } else if matches_any(&compatibles, &get_compats_xavier()) {
             warn_if_not_carrier_board(&["2822"])?;
             return Ok(JETSON_XAVIER.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_nano()) {
+        } else if matches_any(&compatibles, &get_compats_nano()) {
             let module_id = find_pmgr_board("3448")?;
             let revision = module_id.split('-').last().unwrap_or("");
             if revision < "200" {
@@ -276,24 +232,19 @@ pub fn get_model() -> Result<String, String> {
             }
             warn_if_not_carrier_board(&["3449", "3542"])?;
             return Ok(JETSON_NANO.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_nx()) {
+        } else if matches_any(&compatibles, &get_compats_nx()) {
             warn_if_not_carrier_board(&["3509", "3449"])?;
             return Ok(JETSON_NX.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_jetson_orins()) {
+        } else if matches_any(&compatibles, &get_compats_jetson_orins()) {
             warn_if_not_carrier_board(&["3737"])?;
             return Ok(JETSON_ORIN.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_jetson_orins_nx()) {
+        } else if matches_any(&compatibles, &get_compats_jetson_orins_nx()) {
             warn_if_not_carrier_board(&["3509", "3768"])?;
             return Ok(JETSON_ORIN_NX.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_jetson_orins_nano()) {
+        } else if matches_any(&compatibles, &get_compats_jetson_orins_nano()) {
             warn_if_not_carrier_board(&["3509", "3768"])?;
             return Ok(JETSON_ORIN_NANO.to_string());
-        }
-        else if matches_any(&compatibles, &get_compats_jetson_thor_reference()) {
+        } else if matches_any(&compatibles, &get_compats_jetson_thor_reference()) {
             warn_if_not_carrier_board(&["3971", "4071"])?;
             return Ok(JETSON_THOR_REFERENCE.to_string());
         }
@@ -380,8 +331,7 @@ fn find_pmgr_board(prefix: &str) -> Result<String, String> {
                         }
                     }
                 }
-            }
-            else if Path::new(ids_path).is_file() {
+            } else if Path::new(ids_path).is_file() {
                 if let Ok(content) = fs::read_to_string(ids_path) {
                     for s in content.split_whitespace() {
                         if s.starts_with(prefix) {
@@ -397,4 +347,63 @@ fn find_pmgr_board(prefix: &str) -> Result<String, String> {
         "Could not find PMGR board with prefix '{}'",
         prefix
     ))
+}
+
+pub fn get_data() -> (String, JetsonInfo, HashMap<Mode, HashMap<u32, ChannelInfo>>) {
+    let model = get_model().unwrap();
+    let (pin_defs, jetson_info) = get_jetson_data(&model);
+    let pwm_dirs = resolve_pwm_chip_dirs(&pin_defs);
+
+    let make_channel_info = |pin: &GpioPin, channel: u32| ChannelInfo {
+        channel,
+        chip_fd: None,
+        line_handle: None,
+        line_offset: pin.linux_gpio,
+        direction: None,
+        edge: None,
+        consumer: "jetsongpio-rs".to_string(),
+        gpio_name: pin.gpio_name.clone(),
+        gpio_chip: pin.gpio_chip.clone(),
+        pwm_chip_dir: pin
+            .pwm_chip_sysfs_dir
+            .as_deref()
+            .and_then(|name| pwm_dirs.get(name).cloned()),
+        pwm_id: pin.pwm_id,
+        reg_addr: pin.padctl_addr,
+        f_duty_cycle: None,
+    };
+
+    let board_channels: HashMap<u32, ChannelInfo> = pin_defs
+        .iter()
+        .map(|pin| (pin.board_pin, make_channel_info(pin, pin.board_pin)))
+        .collect();
+
+    let bcm_channels: HashMap<u32, ChannelInfo> = pin_defs
+        .iter()
+        .map(|pin| (pin.bcm_pin, make_channel_info(pin, pin.bcm_pin)))
+        .collect();
+
+    let cvm_channels: HashMap<u32, ChannelInfo> = pin_defs
+        .iter()
+        .map(|pin| {
+            let key = hash_string(&pin.cvm_pin) as u32;
+            (key, make_channel_info(pin, key))
+        })
+        .collect();
+
+    let tegra_soc_channels: HashMap<u32, ChannelInfo> = pin_defs
+        .iter()
+        .map(|pin| {
+            let key = hash_string(&pin.tegra_soc_pin) as u32;
+            (key, make_channel_info(pin, key))
+        })
+        .collect();
+
+    let mut all_modes = HashMap::new();
+    all_modes.insert(Mode::BOARD, board_channels);
+    all_modes.insert(Mode::BCM, bcm_channels);
+    all_modes.insert(Mode::CVM, cvm_channels);
+    all_modes.insert(Mode::TegraSoc, tegra_soc_channels);
+
+    (model, jetson_info, all_modes)
 }
