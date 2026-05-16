@@ -1,5 +1,6 @@
-use crate::gpio_pin_data::{get_jetson_data, get_model, GpioPin};
-use clap::{Parser, Subcommand};
+use crate::gpio::{Direction, GPIO, Level};
+use crate::gpio_pin_data::{get_jetson_data, get_model, GpioPin, Mode};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::fmt;
 
 /// CLI tool for NVIDIA Jetson GPIO operations
@@ -18,12 +19,87 @@ enum Commands {
         /// Board Mode GPIO pin number (e.g., 7, 11, 40, etc.)
         gpio_pin: u32,
     },
+    /// Quick set pin to HIGH (automatically setup as OUT)
+    High {
+        /// GPIO pin number
+        pin: u32,
+    },
+    /// Quick set pin to LOW (automatically setup as OUT)
+    Low {
+        /// GPIO pin number
+        pin: u32,
+    },
+    /// Setup a GPIO pin with direction and optional initial value
+    Setup {
+        /// GPIO pin number
+        pin: u32,
+        /// Direction: in or out
+        #[arg(long, value_enum)]
+        direction: DirectionArg,
+        /// Initial value for output (high or low)
+        #[arg(long, value_enum)]
+        initial: Option<LevelArg>,
+    },
+    /// Set a GPIO pin value (must be setup as OUT first)
+    Set {
+        /// GPIO pin number
+        pin: u32,
+        /// Value: high or low
+        value: LevelArg,
+    },
+    /// Read a GPIO pin value
+    Read {
+        /// GPIO pin number
+        pin: u32,
+    },
+    /// Cleanup GPIO pin(s)
+    Cleanup {
+        /// GPIO pin number (optional, if not specified cleanup all)
+        pin: Option<u32>,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum DirectionArg {
+    In,
+    Out,
+}
+
+impl From<DirectionArg> for Direction {
+    fn from(arg: DirectionArg) -> Self {
+        match arg {
+            DirectionArg::In => Direction::IN,
+            DirectionArg::Out => Direction::OUT,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum LevelArg {
+    High,
+    Low,
+}
+
+impl From<LevelArg> for Level {
+    fn from(arg: LevelArg) -> Self {
+        match arg {
+            LevelArg::High => Level::HIGH,
+            LevelArg::Low => Level::LOW,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum CliError {
     PinNotFound(u32, String),
     ModelDetectionFailed(String),
+    GpioError(String),
+}
+
+impl From<anyhow::Error> for CliError {
+    fn from(e: anyhow::Error) -> Self {
+        CliError::GpioError(e.to_string())
+    }
 }
 
 impl fmt::Display for CliError {
@@ -34,6 +110,9 @@ impl fmt::Display for CliError {
             }
             CliError::ModelDetectionFailed(e) => {
                 write!(f, "Failed to detect Jetson model: {}", e)
+            }
+            CliError::GpioError(e) => {
+                write!(f, "GPIO error: {}", e)
             }
         }
     }
@@ -62,12 +141,105 @@ fn run_pinmux_lookup(gpio_pin: u32) -> Result<(), CliError> {
     Ok(())
 }
 
+fn run_high(pin: u32) -> Result<(), CliError> {
+    let mut gpio = GPIO::new();
+    gpio.setmode(Mode::BOARD)?;
+    gpio.setup(vec![pin], Direction::OUT, Some(Level::HIGH), None)?;
+    println!("GPIO Pin {} set to HIGH", pin);
+    Ok(())
+}
+
+fn run_low(pin: u32) -> Result<(), CliError> {
+    let mut gpio = GPIO::new();
+    gpio.setmode(Mode::BOARD)?;
+    gpio.setup(vec![pin], Direction::OUT, Some(Level::LOW), None)?;
+    println!("GPIO Pin {} set to LOW", pin);
+    Ok(())
+}
+
+fn run_setup(pin: u32, direction: DirectionArg, initial: Option<LevelArg>) -> Result<(), CliError> {
+    let mut gpio = GPIO::new();
+    gpio.setmode(Mode::BOARD)?;
+    let initial_level = initial.map(|l| l.into());
+    gpio.setup(vec![pin], direction.into(), initial_level, None)?;
+    println!("GPIO Pin {} setup as {:?}{}", pin, direction, initial.map(|l| format!(" with initial {:?}", l)).unwrap_or_default());
+    Ok(())
+}
+
+fn run_set(pin: u32, value: LevelArg) -> Result<(), CliError> {
+    let mut gpio = GPIO::new();
+    gpio.setmode(Mode::BOARD)?;
+    gpio.output(vec![pin], vec![value.into()])?;
+    println!("GPIO Pin {} set to {:?}", pin, value);
+    Ok(())
+}
+
+fn run_read(pin: u32) -> Result<(), CliError> {
+    let mut gpio = GPIO::new();
+    gpio.setmode(Mode::BOARD)?;
+    let level = gpio.input(pin)?;
+    println!("GPIO Pin {} = {:?}", pin, level);
+    Ok(())
+}
+
+fn run_cleanup(pin: Option<u32>) -> Result<(), CliError> {
+    let mut gpio = GPIO::new();
+    gpio.setmode(Mode::BOARD)?;
+    match pin {
+        Some(p) => {
+            gpio.cleanup(Some(vec![p]))?;
+            println!("GPIO Pin {} cleaned up", p);
+        }
+        None => {
+            gpio.cleanup(None)?;
+            println!("All GPIO pins cleaned up");
+        }
+    }
+    Ok(())
+}
+
 pub fn run() {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::PinmuxLookup { gpio_pin } => {
             if let Err(e) = run_pinmux_lookup(gpio_pin) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::High { pin } => {
+            if let Err(e) = run_high(pin) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Low { pin } => {
+            if let Err(e) = run_low(pin) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Setup { pin, direction, initial } => {
+            if let Err(e) = run_setup(pin, direction, initial) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Set { pin, value } => {
+            if let Err(e) = run_set(pin, value) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Read { pin } => {
+            if let Err(e) = run_read(pin) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Cleanup { pin } => {
+            if let Err(e) = run_cleanup(pin) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

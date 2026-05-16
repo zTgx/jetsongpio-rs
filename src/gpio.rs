@@ -27,7 +27,7 @@ const GPIOHANDLE_REQUEST_OUTPUT: u32 = 0x2;
 /// gpio.setup(vec![7, 11], Direction::OUT, None).unwrap();
 /// gpio.output(vec![7, 11], vec![Level::HIGH, Level::LOW]).unwrap();
 /// ```
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Level {
     LOW = 0,
     HIGH = 1,
