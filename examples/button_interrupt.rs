@@ -23,7 +23,7 @@
 //!
 //! Press CTRL+C to exit
 
-use jetsongpio::{Direction, GPIOEvent, Level, Mode};
+use jetsongpio::{Direction, GPIO, Level, Mode};
 use jetsongpio::gpio_event::Edge;
 use std::thread;
 use std::time::Duration;
@@ -32,28 +32,14 @@ const LED1_PIN: u32 = 12;  // Board pin 12
 const LED2_PIN: u32 = 13;  // Board pin 13
 const BUTTON_PIN: u32 = 18; // Board pin 18
 
-/// Blink LED2 quickly 5 times when button pressed
-fn blink(led2_pin: u32) {
-    println!("Blink LED2 on pin {}", led2_pin);
-    for _ in 0..5 {
-        // In a real application, you would need to store a reference to GPIO
-        // or pass it via Arc<Mutex<GPIOEvent>> to access the output method
-        // For this example, we just print the action
-        println!("LED2 HIGH");
-        thread::sleep(Duration::from_millis(500));
-        println!("LED2 LOW");
-        thread::sleep(Duration::from_millis(500));
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create GPIO instance with event support
-    let mut gpio = GPIOEvent::new();
+    // Create GPIO instance
+    let mut gpio = GPIO::new();
 
     // Pin Setup:
     gpio.setmode(Mode::BOARD)?;
-    gpio.setup(vec![LED1_PIN, LED2_PIN], Direction::OUT, Some(Level::LOW))?;
-    gpio.setup(vec![BUTTON_PIN], Direction::IN, None)?;
+    gpio.setup(vec![LED1_PIN, LED2_PIN], Direction::OUT, Some(Level::LOW), None)?;
+    gpio.setup(vec![BUTTON_PIN], Direction::IN, None, None)?;
 
     // Initial state for LEDs:
     gpio.output(vec![LED1_PIN, LED2_PIN], vec![Level::LOW, Level::LOW])?;
@@ -63,7 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         BUTTON_PIN,
         Edge::Falling,
         Box::new(|| {
-            blink(LED2_PIN);
+            println!("Button pressed! Blink LED2");
+            for _ in 0..5 {
+                println!("LED2 HIGH");
+                thread::sleep(Duration::from_millis(500));
+                println!("LED2 LOW");
+                thread::sleep(Duration::from_millis(500));
+            }
         }),
         Some(Duration::from_millis(200)), // 200ms debounce
     )?;

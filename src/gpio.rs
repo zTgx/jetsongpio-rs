@@ -169,6 +169,9 @@ pub struct GPIO {
 
     // Dictionary used as a lookup table from GPIO chip name to chip fd
     pub chip_fd_map: HashMap<String, std::fs::File>,
+
+    // Event manager for edge detection
+    pub event_manager: Option<crate::gpio_event::EventManager>,
 }
 
 impl GPIO {
@@ -189,6 +192,7 @@ impl GPIO {
             gpio_mode: None,
             channel_configuration: HashMap::new(),
             chip_fd_map: HashMap::new(),
+            event_manager: None,
         }
     }
 

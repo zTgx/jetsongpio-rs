@@ -22,7 +22,7 @@
 //!
 //! Press CTRL+C to exit
 
-use jetsongpio::{Direction, GPIOEvent, Level, Mode};
+use jetsongpio::{Direction, GPIO, Level, Mode};
 use jetsongpio::gpio_event::Edge;
 use std::thread;
 use std::time::Duration;
@@ -31,13 +31,13 @@ const LED_PIN: u32 = 12;  // Board pin 12
 const BUTTON_PIN: u32 = 18; // Board pin 18
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create GPIO instance with event support
-    let mut gpio = GPIOEvent::new();
+    // Create GPIO instance
+    let mut gpio = GPIO::new();
 
     // Pin Setup:
     gpio.setmode(Mode::BOARD)?;
-    gpio.setup(vec![LED_PIN], Direction::OUT, Some(Level::LOW))?;
-    gpio.setup(vec![BUTTON_PIN], Direction::IN, None)?;
+    gpio.setup(vec![LED_PIN], Direction::OUT, Some(Level::LOW), None)?;
+    gpio.setup(vec![BUTTON_PIN], Direction::IN, None, None)?;
 
     // Initial state for LED:
     gpio.output(vec![LED_PIN], vec![Level::LOW])?;
