@@ -10,38 +10,9 @@ the [Jetson.GPIO](https://github.com/NVIDIA/jetson-gpio) Python library.
 This library uses the Linux GPIO character device API (`/dev/gpiochipX`) and
 does not depend on the deprecated sysfs interface.
 
-## Supported Platforms
-
-| Model | Status |
-|---|---|
-| Jetson TX1 | Supported |
-| Jetson TX2 | Supported |
-| Jetson TX2 NX | Supported |
-| Clara AGX Xavier | Supported |
-| Jetson AGX Xavier | Supported |
-| Jetson Xavier NX | Supported |
-| Jetson Nano | Supported |
-| Jetson AGX Orin | Supported |
-| Jetson Orin NX | Supported |
-| Jetson Orin Nano | Supported |
-| Jetson Thor Reference | Supported |
-
 Pin definitions are automatically synchronized from the upstream `jetson-gpio`
 repository via a git submodule and code generation at build time. See the
 [Data Synchronization](#data-synchronization) section for details.
-
-## Features
-
-- GPIO character device API (not sysfs)
-- Pin numbering modes: BOARD, BCM, Tegra SOC, CVM
-- Input and output modes with configurable initial state
-- Hardware PWM output with configurable frequency and duty cycle
-- GPIO event detection (rising, falling, both edges) with epoll-based polling
-- Callback-based interrupt handling with debounce support
-- Pinmux register address lookup
-- Automatic Jetson model detection via device tree
-- CLI tool for quick GPIO operations
-- Compile-time validation of pin data via `build.rs`
 
 ## Requirements
 
@@ -387,9 +358,7 @@ Rust code into `OUT_DIR`. This includes:
 To update pin data from upstream:
 
 ```bash
-cd vendor/jetson-gpio
-git pull origin master
-cd ../..
+git submodule update --init --remote vendor/jetson-gpio
 cargo build
 ```
 
