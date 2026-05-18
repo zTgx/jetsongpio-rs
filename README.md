@@ -55,7 +55,7 @@ jetsongpio = "0.1"
 
 ### 1. Pin Numbering
 
-The library provides four ways of numbering the I/O pins:
+The library provides two ways of numbering the I/O pins:
 
 ```rust
 use jetsongpio::{GPIO, Mode};
@@ -67,13 +67,12 @@ gpio.setmode(Mode::BOARD)?;
 
 // Broadcom SoC GPIO numbers
 gpio.setmode(Mode::BCM)?;
-
-// CVM/CVB connector signal names
-gpio.setmode(Mode::CVM)?;
-
-// Tegra SoC pin names
-gpio.setmode(Mode::TegraSoc)?;
 ```
+
+> Python's `CVM` / `TEGRA_SOC` modes are intentionally omitted. They key the
+> channel map by pin-name string, which doesn't fit this port's integer-channel
+> API. Use BOARD or BCM and look up the corresponding pin name yourself if
+> needed.
 
 Call `setmode()` before any other GPIO operation. The mode cannot be changed
 once set. To check which mode has been set:
@@ -181,8 +180,11 @@ let mut gpio = GPIO::new();
 gpio.setmode(Mode::BOARD)?;
 gpio.setup(vec![18], Direction::IN, None, None)?;
 
-// Blocking wait with timeout
-let detected = gpio.wait_for_edge(18, Edge::Falling, Some(Duration::from_secs(5)))?;
+// Blocking wait with timeout. `None` blocks forever.
+// Returns Some(channel) on detection, None on timeout.
+if let Some(ch) = gpio.wait_for_edge(18, Edge::Falling, Some(Duration::from_secs(5)))? {
+    println!("Edge on channel {ch}");
+}
 ```
 
 The edge parameter can be `Edge::Rising`, `Edge::Falling`, or `Edge::Both`.
@@ -193,10 +195,10 @@ This function can be used to periodically check if an event occurred since the
 last call:
 
 ```rust
-gpio.add_event_detect(18, Edge::Rising, None, None)?;
+gpio.add_event_detect(18, Edge::Rising, None, None, None)?;
 
 // ... in your main loop ...
-if gpio.event_detected(18)? {
+if gpio.event_detected(18) {
     println!("Event detected on pin 18!");
 }
 ```
@@ -204,21 +206,26 @@ if gpio.event_detected(18)? {
 #### Callback function
 
 A callback function can be run when an edge is detected, concurrent to the main
-program:
+program. The callback receives the channel number as its argument (matches
+Python `lambda: callback(channel)`).
 
 ```rust
 gpio.add_event_detect(
     18,
     Edge::Falling,
-    Some(Box::new(|| println!("Button pressed!"))),
+    Some(Box::new(|ch| println!("Pressed on pin {ch}!"))),
     Some(Duration::from_millis(200)), // debounce
+    None,                             // polltime (defaults to 200ms)
 )?;
+
+// Append additional callbacks afterwards if you like:
+gpio.add_event_callback(18, Box::new(|ch| println!("Also: {ch}")))?;
 ```
 
-To remove event detection:
+To remove event detection (defaults to 500ms timeout for the handler thread):
 
 ```rust
-gpio.remove_event_detect(18)?;
+gpio.remove_event_detect(18, None)?;
 ```
 
 ### 9. Hardware PWM

@@ -45,10 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Waiting for button event on pin {}", BUTTON_PIN);
 
     loop {
-        // Wait for button press (falling edge)
-        let detected = gpio.wait_for_edge(BUTTON_PIN, Edge::Falling, None)?;
-
-        if detected {
+        // Wait for button press (falling edge). `None` blocks forever.
+        if gpio
+            .wait_for_edge(BUTTON_PIN, Edge::Falling, None)?
+            .is_some()
+        {
             // Event received when button pressed
             println!("Button Pressed!");
             gpio.output(vec![LED_PIN], vec![Level::HIGH])?;

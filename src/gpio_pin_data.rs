@@ -51,21 +51,17 @@ pub enum Direction {
 pub enum Mode {
     BOARD,
     BCM,
-    TegraSoc,
-    CVM,
 }
 
 impl Mode {
     pub fn is_valid(&self) -> bool {
-        matches!(self, Mode::BOARD | Mode::BCM | Mode::TegraSoc | Mode::CVM)
+        matches!(self, Mode::BOARD | Mode::BCM)
     }
 
     pub fn to_str(&self) -> &'static str {
         match self {
             Mode::BOARD => "BOARD",
             Mode::BCM => "BCM",
-            Mode::TegraSoc => "TegraSoc",
-            Mode::CVM => "CVM",
         }
     }
 }
@@ -273,15 +269,6 @@ fn matches_any(compatibles: &[String], patterns: &[&str]) -> bool {
     })
 }
 
-fn hash_string(s: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
-
 static mut WARNED: bool = false;
 
 fn warn_if_not_carrier_board(carrier_boards: &[&str]) -> Result<(), String> {
@@ -383,27 +370,9 @@ pub fn get_data() -> (String, JetsonInfo, HashMap<Mode, HashMap<u32, ChannelInfo
         .map(|pin| (pin.bcm_pin, make_channel_info(pin, pin.bcm_pin)))
         .collect();
 
-    let cvm_channels: HashMap<u32, ChannelInfo> = pin_defs
-        .iter()
-        .map(|pin| {
-            let key = hash_string(&pin.cvm_pin) as u32;
-            (key, make_channel_info(pin, key))
-        })
-        .collect();
-
-    let tegra_soc_channels: HashMap<u32, ChannelInfo> = pin_defs
-        .iter()
-        .map(|pin| {
-            let key = hash_string(&pin.tegra_soc_pin) as u32;
-            (key, make_channel_info(pin, key))
-        })
-        .collect();
-
     let mut all_modes = HashMap::new();
     all_modes.insert(Mode::BOARD, board_channels);
     all_modes.insert(Mode::BCM, bcm_channels);
-    all_modes.insert(Mode::CVM, cvm_channels);
-    all_modes.insert(Mode::TegraSoc, tegra_soc_channels);
 
     (model, jetson_info, all_modes)
 }

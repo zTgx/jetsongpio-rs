@@ -20,11 +20,13 @@
 //!
 //! # Pin Numbering
 //!
-//! Four modes are supported:
+//! Two modes are supported:
 //! - [`Mode::BOARD`] — physical pin number on the 40-pin header
 //! - [`Mode::BCM`] — BCM numbering
-//! - [`Mode::CVM`] — CVM connector name
-//! - [`Mode::TegraSoc`] — Tegra SoC pin name
+//!
+//! Python's `CVM` / `TEGRA_SOC` modes are intentionally not implemented:
+//! they key the channel map by pin-name string, which doesn't fit this port's
+//! integer-channel API.
 
 #![allow(dead_code)]
 
@@ -42,5 +44,5 @@ pub mod cli;
 // ── Public re-exports ────────────────────────────────────────────────────
 
 pub use gpio::{Direction, GPIO, Level, PWM};
-pub use gpio_event::Edge;
-pub use gpio_pin_data::{Mode, get_model};
+pub use gpio_event::{Edge, EdgeCallback, EventManager};
+pub use gpio_pin_data::{ChannelInfo, JetsonInfo, Mode, get_model};

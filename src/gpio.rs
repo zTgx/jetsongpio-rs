@@ -26,7 +26,7 @@ const GPIOHANDLE_REQUEST_OUTPUT: u32 = 0x2;
 /// let mut gpio = GPIO::new();
 /// gpio.setmode(Mode::BOARD).unwrap();
 ///
-/// gpio.setup(vec![7, 11], Direction::OUT, None).unwrap();
+/// gpio.setup(vec![7, 11], Direction::OUT, None, None).unwrap();
 /// gpio.output(vec![7, 11], vec![Level::HIGH, Level::LOW]).unwrap();
 /// ```
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -52,7 +52,7 @@ pub enum Level {
 ///
 /// let mut gpio = GPIO::new();
 ///
-/// gpio.setup(vec![7], Direction::OUT, None).unwrap();
+/// gpio.setup(vec![7], Direction::OUT, None, None).unwrap();
 /// ```
 #[derive(PartialEq, Clone, Copy)]
 pub enum Direction {
@@ -83,37 +83,6 @@ impl Direction {
             Direction::OUT => GPIOHANDLE_REQUEST_OUTPUT,
             _ => GPIOHANDLE_REQUEST_INPUT,
         }
-    }
-}
-
-// Edge possibilities
-#[derive(PartialEq, Clone, Copy)]
-pub enum Edge {
-    RISING = 31,  // 1 + _EDGE_OFFSET (30)
-    FALLING = 32, // 2 + _EDGE_OFFSET (30)
-    BOTH = 33,    // 3 + _EDGE_OFFSET (30)
-}
-
-impl Edge {
-    pub fn is_valid(&self) -> bool {
-        matches!(self, Edge::RISING | Edge::FALLING | Edge::BOTH)
-    }
-}
-
-// Pull up/down options
-#[derive(PartialEq, Clone, Copy)]
-pub enum PullUpDown {
-    PudOff = 20,  // 0 + _PUD_OFFSET (20)
-    PudDown = 21, // 1 + _PUD_OFFSET (20)
-    PudUp = 22,   // 2 + _PUD_OFFSET (20)
-}
-
-impl PullUpDown {
-    pub fn is_valid(&self) -> bool {
-        matches!(
-            self,
-            PullUpDown::PudOff | PullUpDown::PudDown | PullUpDown::PudUp
-        )
     }
 }
 
@@ -205,13 +174,11 @@ impl GPIO {
         self.gpio_warnings = warnings;
     }
 
-    /// Sets the pin mumbering mode.
+    /// Sets the pin numbering mode.
     ///
     /// Possible mode values are
     /// * `Mode::BOARD`
     /// * `Mode::BCM`
-    /// * `Mode::TEGRA_SOC`
-    /// * `Mode::CVM`
     ///
     /// # Arguments
     ///
@@ -244,7 +211,7 @@ impl GPIO {
         match self.gpio_mode {
             Some(_) => Ok(()),
             None => Err(Error::msg(
-                "Please set pin numbering mode using GPIO.setmode(Mode::BOARD), GPIO.setmode(Mode::BCM), GPIO.setmode(Mode::TEGRA_SOC) or GPIO.setmode(Mode::CVM)",
+                "Please set pin numbering mode using GPIO.setmode(Mode::BOARD) or GPIO.setmode(Mode::BCM)",
             )),
         }
     }
@@ -313,29 +280,20 @@ impl GPIO {
         direction: u32,
         initial: Option<u8>,
         consumer: &str,
-    ) {
+    ) -> Result<(), Error> {
         let chip_name = ch_info.gpio_chip.clone();
         let chip_fd = if !self.chip_fd_map.contains_key(&chip_name) {
-            let fd = chip_open_by_label(&chip_name).expect("Failed to open GPIO chip");
+            let fd = chip_open_by_label(&chip_name)?;
             self.chip_fd_map.insert(chip_name.clone(), fd);
-            self.chip_fd_map
-                .get(&chip_name)
-                .unwrap()
-                .try_clone()
-                .expect("Failed to clone chip fd")
+            self.chip_fd_map.get(&chip_name).unwrap().try_clone()?
         } else {
-            self.chip_fd_map
-                .get(&chip_name)
-                .unwrap()
-                .try_clone()
-                .expect("Failed to clone chip fd")
+            self.chip_fd_map.get(&chip_name).unwrap().try_clone()?
         };
 
         let chip_fd_raw = chip_fd.as_raw_fd();
 
-        let mut request = request_handle(ch_info.line_offset, direction, initial, consumer)
-            .expect("Failed to create request");
-        let line_handle = open_line(&mut request, &chip_fd).expect("Failed to open GPIO line");
+        let mut request = request_handle(ch_info.line_offset, direction, initial, consumer)?;
+        let line_handle = open_line(&mut request, &chip_fd)?;
 
         let mut ch_info = ch_info;
         ch_info.chip_fd = Some(chip_fd_raw);
@@ -350,6 +308,7 @@ impl GPIO {
         self.channel_configuration
             .insert(ch_info.channel, Direction::from_cdev(direction as i32));
         self.channel_data.insert(ch_info.channel, ch_info);
+        Ok(())
     }
 
     fn cleanup_one(&mut self, ch_info: ChannelInfo) {
@@ -360,24 +319,34 @@ impl GPIO {
                 pwm_unexport(&ch_info).ok();
             }
             _ => {
+                // Mirror Python gpio.py:_cleanup_one — also tear down any edge
+                // detection registered on this channel before closing the line.
+                if let Some(ref mut manager) = self.event_manager {
+                    manager.event_cleanup(&ch_info.gpio_chip, ch_info.channel);
+                }
                 if let Some(line_handle) = ch_info.line_handle {
                     let _ = close_line(Some(line_handle));
                 }
             }
         }
         self.channel_configuration.remove(&ch_info.channel);
+
+        // Drop our reference to this chip's fd if it's no longer needed.
+        if let Some(chip_fd) = self.chip_fd_map.remove(&ch_info.gpio_chip) {
+            let _ = close_chip(Some(chip_fd));
+        }
     }
 
     fn cleanup_all(&mut self) -> Result<(), Error> {
-        // Close all chip file descriptors
-        for (_chip_name, chip_fd) in self.chip_fd_map.drain() {
-            let _ = close_chip(Some(chip_fd));
-        }
-
-        // Clean up all channels
+        // Iterate channels first (Python order). Each cleanup_one closes its chip fd.
         let ch_infos_to_cleanup: Vec<ChannelInfo> = self.channel_data.values().cloned().collect();
         for ch_info in ch_infos_to_cleanup {
             self.cleanup_one(ch_info);
+        }
+
+        // Sweep any chip fds that weren't claimed by a channel (defensive).
+        for (_chip_name, chip_fd) in self.chip_fd_map.drain() {
+            let _ = close_chip(Some(chip_fd));
         }
 
         self.gpio_mode = None;
@@ -385,13 +354,18 @@ impl GPIO {
         Ok(())
     }
 
-    fn setup_single_out(&mut self, ch_info: ChannelInfo, initial: Option<Level>, consumer: &str) {
+    fn setup_single_out(
+        &mut self,
+        ch_info: ChannelInfo,
+        initial: Option<Level>,
+        consumer: &str,
+    ) -> Result<(), Error> {
         let initial_value = initial.map(|l| l as u8);
-        self.do_one_channel(ch_info, Direction::OUT.to_cdev(), initial_value, consumer);
+        self.do_one_channel(ch_info, Direction::OUT.to_cdev(), initial_value, consumer)
     }
 
-    fn setup_single_in(&mut self, ch_info: ChannelInfo, consumer: &str) {
-        self.do_one_channel(ch_info, Direction::IN.to_cdev(), None, consumer);
+    fn setup_single_in(&mut self, ch_info: ChannelInfo, consumer: &str) -> Result<(), Error> {
+        self.do_one_channel(ch_info, Direction::IN.to_cdev(), None, consumer)
     }
 
     /// Setup a channel or list of channels with a direction and (optional) pull/up down control and (optional) initial value.
@@ -443,7 +417,7 @@ impl GPIO {
         match direction {
             Direction::OUT => {
                 for ch_info in ch_infos_owned {
-                    self.setup_single_out(ch_info, initial, consumer);
+                    self.setup_single_out(ch_info, initial, consumer)?;
                 }
             }
             Direction::IN => {
@@ -451,7 +425,7 @@ impl GPIO {
                     return Err(Error::msg("initial parameter is not valid for inputs"));
                 }
                 for ch_info in ch_infos_owned {
-                    self.setup_single_in(ch_info, consumer);
+                    self.setup_single_in(ch_info, consumer)?;
                 }
             }
             _ => {
@@ -544,7 +518,7 @@ impl GPIO {
     ///
     /// let mut gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();
-    /// gpio.setup(vec![7], Direction::OUT, None).unwrap();
+    /// gpio.setup(vec![7], Direction::OUT, None, None).unwrap();
     /// gpio.output(vec![7], vec![Level::HIGH]).unwrap();
     /// ```
     pub fn output(&self, channels: Vec<u32>, values: Vec<Level>) -> Result<(), Error> {
@@ -797,6 +771,13 @@ impl PWM {
         self.reconfigure(frequency_hz, self.duty_cycle_percent, false)
     }
 
+    /// Returns true if `cleanup()` already tore this PWM down via the parent
+    /// `GPIO`. Used by `Drop` so it does not attempt to unexport twice.
+    fn already_cleaned_up(&self) -> bool {
+        // After cleanup_one runs pwm_unexport, the sysfs pwmN directory is gone.
+        !Path::new(&pwm_path(&self.ch_info)).exists()
+    }
+
     fn reconfigure(
         &mut self,
         frequency_hz: f64,
@@ -840,5 +821,20 @@ impl PWM {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for PWM {
+    /// Mirrors Python `PWM.__del__` — disable the PWM and unexport the sysfs
+    /// entry. Note: unlike Python (which uses module-level singletons), this
+    /// Rust port cannot reach back into the parent `GPIO` to clear
+    /// `channel_configuration` from `Drop`. Callers should still invoke
+    /// `GPIO::cleanup` to fully reset that bookkeeping.
+    fn drop(&mut self) {
+        if self.already_cleaned_up() {
+            return;
+        }
+        let _ = pwm_disable(&self.ch_info);
+        let _ = pwm_unexport(&self.ch_info);
     }
 }

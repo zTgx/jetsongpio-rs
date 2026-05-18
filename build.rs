@@ -1,7 +1,61 @@
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+
+/// Escape a string for safe inclusion inside a Rust `"..."` literal.
+fn escape_rust_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{{{:x}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Count delimiters in `line` while skipping any that appear inside a Python
+/// single- or double-quoted string literal. Returns `(deltas: HashMap<char, i32>)`
+/// for each delimiter the caller asked about. Triple-quoted strings are not
+/// expected in `gpio_pin_data.py` and are not handled.
+fn count_delims_outside_strings(line: &str, delims: &[char]) -> HashMap<char, i32> {
+    let mut counts: HashMap<char, i32> = delims.iter().map(|&c| (c, 0)).collect();
+    let mut chars = line.chars().peekable();
+    let mut in_str: Option<char> = None;
+    let mut prev_backslash = false;
+    while let Some(c) = chars.next() {
+        if let Some(quote) = in_str {
+            if prev_backslash {
+                prev_backslash = false;
+            } else if c == '\\' {
+                prev_backslash = true;
+            } else if c == quote {
+                in_str = None;
+            }
+            continue;
+        }
+        if c == '#' {
+            break; // rest of line is a Python comment
+        }
+        if c == '\'' || c == '"' {
+            in_str = Some(c);
+            continue;
+        }
+        if let Some(slot) = counts.get_mut(&c) {
+            *slot += 1;
+        }
+    }
+    counts
+}
 
 const PYTHON_PIN_DATA_PATH: &str = "vendor/jetson-gpio/lib/python/Jetson/GPIO/gpio_pin_data.py";
 
@@ -90,6 +144,23 @@ fn generate_rust_code(python_content: &str) -> String {
              compat_to_model mapping may be missing or Python get_model() changed",
             model.model_const_name
         );
+        // Metadata fields are required — empty strings here would silently
+        // ship a JetsonInfo with blank TYPE / RAM, masking parser drift.
+        assert!(
+            !model.ram.is_empty(),
+            "build.rs: model {} has empty RAM — metadata parser likely missed the entry",
+            model.model_const_name
+        );
+        assert!(
+            !model.model_type.is_empty(),
+            "build.rs: model {} has empty TYPE — metadata parser likely missed the entry",
+            model.model_const_name
+        );
+        assert!(
+            !model.processor.is_empty(),
+            "build.rs: model {} has empty PROCESSOR — metadata parser likely missed the entry",
+            model.model_const_name
+        );
     }
 
     // ── Generation ──────────────────────────────────────────────────────
@@ -131,7 +202,7 @@ fn generate_rust_code(python_content: &str) -> String {
         ));
         for pin in &model.pin_defs {
             let pwm_dir = match &pin.pwm_chip_dir {
-                Some(s) => format!("Some(\"{}\")", s),
+                Some(s) => format!("Some(\"{}\")", escape_rust_str(s)),
                 None => "None".to_string(),
             };
             let pwm_id = match pin.pwm_id {
@@ -145,12 +216,12 @@ fn generate_rust_code(python_content: &str) -> String {
             out.push_str(&format!(
                 "        GpioPin::new({}, \"{}\", \"{}\", {}, {}, \"{}\", \"{}\", {}, {}, {}),\n",
                 pin.linux_gpio,
-                pin.gpio_name,
-                pin.gpio_chip,
+                escape_rust_str(&pin.gpio_name),
+                escape_rust_str(&pin.gpio_chip),
                 pin.board_pin,
                 pin.bcm_pin,
-                pin.cvm_pin,
-                pin.tegra_soc_pin,
+                escape_rust_str(&pin.cvm_pin),
+                escape_rust_str(&pin.tegra_soc_pin),
                 pwm_dir,
                 pwm_id,
                 padctl,
@@ -166,91 +237,42 @@ fn generate_rust_code(python_content: &str) -> String {
             model.compat_func_name
         ));
         for compat in &model.compats {
-            out.push_str(&format!("        \"{}\",\n", compat));
+            out.push_str(&format!("        \"{}\",\n", escape_rust_str(compat)));
         }
         out.push_str("    ]\n}\n\n");
     }
 
     // get_jetson_data()
+    //
+    // Each arm is generated per *model* (not per shared pin_defs group), so the
+    // model-specific metadata is always correct. Models that share pin_defs
+    // simply re-use the same `get_<func>_pin_defs()` call — that's the only
+    // thing the "sharing" relationship affects.
     out.push_str(
         "pub fn get_jetson_data(model: &str) -> (Vec<GpioPin>, JetsonInfo) {\n    match model {\n",
     );
 
-    let mut emitted_funcs: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for model in &parsed.models {
-        if emitted_funcs.contains(&model.func_name) {
-            continue;
-        }
-
-        // Find all models that share this func_name (same pin defs)
-        let sharing_models: Vec<&ModelData> = parsed
-            .models
-            .iter()
-            .filter(|m| m.func_name == model.func_name)
-            .collect();
-
-        let match_pattern = sharing_models
-            .iter()
-            .map(|m| m.model_const_name.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ");
-
-        if sharing_models.len() == 1 {
-            let m = &sharing_models[0];
-            out.push_str(&format!(
-                "        {} => (\n            \
-                 get_{}_pin_defs(),\n            \
-                 JetsonInfo {{\n                \
-                 p1_revision: {},\n                \
-                 ram: \"{}\".to_string(),\n                \
-                 revision: \"{}\".to_string(),\n                \
-                 r#type: \"{}\".to_string(),\n                \
-                 manufacturer: \"{}\".to_string(),\n                \
-                 processor: \"{}\".to_string(),\n            \
-                 }},\n        ),\n",
-                match_pattern,
-                m.func_name,
-                m.p1_revision,
-                m.ram,
-                m.revision,
-                m.model_type,
-                m.manufacturer,
-                m.processor,
-            ));
-        } else {
-            // Multiple models sharing pin defs (e.g. ORIN_NX and ORIN_NANO)
-            let first = &sharing_models[0];
-            let second = &sharing_models[1];
-            out.push_str(&format!(
-                "        {} => (\n            \
-                 get_{}_pin_defs(),\n            \
-                 JetsonInfo {{\n                \
-                 p1_revision: {},\n                \
-                 ram: \"{}\".to_string(),\n                \
-                 revision: \"{}\".to_string(),\n                \
-                 r#type: if model == {} {{\n                    \
-                 \"{}\".to_string()\n                \
-                 }} else {{\n                    \
-                 \"{}\".to_string()\n                \
-                 }},\n                \
-                 manufacturer: \"{}\".to_string(),\n                \
-                 processor: \"{}\".to_string(),\n            \
-                 }},\n        ),\n",
-                match_pattern,
-                first.func_name,
-                first.p1_revision,
-                first.ram,
-                first.revision,
-                second.model_const_name,
-                second.model_type,
-                first.model_type,
-                first.manufacturer,
-                first.processor,
-            ));
-        }
-
-        emitted_funcs.insert(model.func_name.clone());
+    for m in &parsed.models {
+        out.push_str(&format!(
+            "        {} => (\n            \
+             get_{}_pin_defs(),\n            \
+             JetsonInfo {{\n                \
+             p1_revision: {},\n                \
+             ram: \"{}\".to_string(),\n                \
+             revision: \"{}\".to_string(),\n                \
+             r#type: \"{}\".to_string(),\n                \
+             manufacturer: \"{}\".to_string(),\n                \
+             processor: \"{}\".to_string(),\n            \
+             }},\n        ),\n",
+            m.model_const_name,
+            m.func_name,
+            m.p1_revision,
+            escape_rust_str(&m.ram),
+            escape_rust_str(&m.revision),
+            escape_rust_str(&m.model_type),
+            escape_rust_str(&m.manufacturer),
+            escape_rust_str(&m.processor),
+        ));
     }
 
     // No default fallback — unknown model is a bug, fail at runtime
@@ -327,20 +349,15 @@ fn parse_python_file(content: &str) -> ParsedPython {
             continue;
         }
 
-        // Track array bracket depth
-        for ch in trimmed.chars() {
-            match ch {
-                '[' => bracket_depth += 1,
-                ']' => {
-                    bracket_depth -= 1;
-                    if bracket_depth == 0 {
-                        current_array = None;
-                        in_tuple = false;
-                        tuple_buf.clear();
-                    }
-                }
-                _ => {}
-            }
+        // Track array bracket depth (ignoring brackets inside string literals)
+        let bracket_counts = count_delims_outside_strings(trimmed, &['[', ']']);
+        bracket_depth += bracket_counts.get(&'[').copied().unwrap_or(0);
+        bracket_depth -= bracket_counts.get(&']').copied().unwrap_or(0);
+        if bracket_depth <= 0 {
+            current_array = None;
+            in_tuple = false;
+            tuple_buf.clear();
+            bracket_depth = 0;
         }
 
         if current_array.is_none() {
@@ -366,15 +383,10 @@ fn parse_python_file(content: &str) -> ParsedPython {
             tuple_buf.push_str(trimmed);
 
             // Count parentheses to know when the tuple closes
-            for ch in trimmed.chars() {
-                match ch {
-                    '(' => tuple_paren_depth += 1,
-                    ')' => {
-                        tuple_paren_depth -= 1;
-                    }
-                    _ => {}
-                }
-            }
+            // (ignoring parens inside string literals)
+            let paren_counts = count_delims_outside_strings(trimmed, &['(', ')']);
+            tuple_paren_depth += paren_counts.get(&'(').copied().unwrap_or(0);
+            tuple_paren_depth -= paren_counts.get(&')').copied().unwrap_or(0);
 
             // Tuple is complete when parens are balanced
             if tuple_paren_depth == 0 {
@@ -546,8 +558,14 @@ fn parse_python_file(content: &str) -> ParsedPython {
     }
 
     // ── 4. Parse jetson_gpio_data dict for metadata ─────────────────────
-    let model_entry_re =
-        regex::Regex::new(r"(CLARA_AGX_XAVIER|JETSON_[A-Z0-9_]+):\s*\(").expect("model_entry_re");
+    // Build the model-name alternation from JETSON_MODELS so we don't hard-
+    // code special cases like CLARA_AGX_XAVIER. Sort by length desc so the
+    // alternation tries the longest names first (regex would otherwise stop
+    // at the first match).
+    let mut model_alt: Vec<&str> = model_order.iter().map(|s| s.as_str()).collect();
+    model_alt.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let model_entry_pattern = format!(r"({}):\s*\(", model_alt.join("|"));
+    let model_entry_re = regex::Regex::new(&model_entry_pattern).expect("model_entry_re");
     let pin_defs_ref_re =
         regex::Regex::new(r"([A-Z][A-Z0-9_]*_PIN_DEFS)\s*,").expect("pin_defs_ref_re");
     let metadata_field_re =
@@ -571,13 +589,9 @@ fn parse_python_file(content: &str) -> ParsedPython {
         if trimmed.starts_with("jetson_gpio_data") {
             in_gpio_data = true;
             brace_depth = 0;
-            for ch in trimmed.chars() {
-                if ch == '{' {
-                    brace_depth += 1;
-                } else if ch == '}' {
-                    brace_depth -= 1;
-                }
-            }
+            let counts = count_delims_outside_strings(trimmed, &['{', '}']);
+            brace_depth += counts.get(&'{').copied().unwrap_or(0);
+            brace_depth -= counts.get(&'}').copied().unwrap_or(0);
             continue;
         }
 
@@ -585,30 +599,30 @@ fn parse_python_file(content: &str) -> ParsedPython {
             continue;
         }
 
-        for ch in trimmed.chars() {
-            match ch {
-                '{' => {
-                    brace_depth += 1;
-                    if brace_depth == 2 {
-                        in_metadata_dict = true;
-                    }
+        // Track brace depth, ignoring braces inside string literals.
+        let counts = count_delims_outside_strings(trimmed, &['{', '}']);
+        let opens = counts.get(&'{').copied().unwrap_or(0);
+        let closes = counts.get(&'}').copied().unwrap_or(0);
+        // Apply opens first so a line like `{ ... }` lands at the right depth.
+        for _ in 0..opens {
+            brace_depth += 1;
+            if brace_depth == 2 {
+                in_metadata_dict = true;
+            }
+        }
+        for _ in 0..closes {
+            brace_depth -= 1;
+            if brace_depth == 1 && in_metadata_dict {
+                if let (Some(mn), Some(pdr)) =
+                    (current_model_name.take(), current_pin_defs_ref.take())
+                {
+                    model_metadata.insert(mn, (pdr, current_metadata.clone()));
                 }
-                '}' => {
-                    brace_depth -= 1;
-                    if brace_depth == 1 && in_metadata_dict {
-                        if let (Some(mn), Some(pdr)) =
-                            (current_model_name.take(), current_pin_defs_ref.take())
-                        {
-                            model_metadata.insert(mn, (pdr, current_metadata.clone()));
-                        }
-                        current_metadata.clear();
-                        in_metadata_dict = false;
-                    }
-                    if brace_depth == 0 {
-                        in_gpio_data = false;
-                    }
-                }
-                _ => {}
+                current_metadata.clear();
+                in_metadata_dict = false;
+            }
+            if brace_depth == 0 {
+                in_gpio_data = false;
             }
         }
 
@@ -702,10 +716,18 @@ fn parse_python_file(content: &str) -> ParsedPython {
             .unwrap_or_default();
 
         // Derive the Rust compat function name from the compat variable name
-        // e.g. "compats_tx1" → "get_compats_tx1"
+        // e.g. "compats_tx1" → "get_compats_tx1". Every model must have a
+        // mapping — the assert at the top of generate_rust_code catches a
+        // missing one before we get here.
         let compat_func_name = compat_var
+            .as_ref()
             .map(|cv| format!("get_{}", cv))
-            .unwrap_or_else(|| format!("get_compats_{}", model_const.to_lowercase()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "build.rs: no compat→model mapping for {} — get_model() in Python may have changed",
+                    model_const
+                )
+            });
 
         models.push(ModelData {
             model_const_name: model_const.clone(),

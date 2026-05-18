@@ -174,9 +174,13 @@ fn run_setup(pin: u32, direction: DirectionArg, initial: Option<LevelArg>) -> Re
 }
 
 fn run_set(pin: u32, value: LevelArg) -> Result<(), CliError> {
+    // CLI invocations are stateless — there is no persistent setup() from a
+    // previous run, so calling output() alone would fail with "channel not
+    // set up as OUTPUT". Setup + output in one shot, identical to high/low.
     let mut gpio = GPIO::new();
     gpio.setmode(Mode::BOARD)?;
-    gpio.output(vec![pin], vec![value.into()])?;
+    let level: Level = value.into();
+    gpio.setup(vec![pin], Direction::OUT, Some(level), None)?;
     println!("GPIO Pin {} set to {:?}", pin, value);
     Ok(())
 }

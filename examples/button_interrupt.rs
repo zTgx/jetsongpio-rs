@@ -48,20 +48,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initial state for LEDs:
     gpio.output(vec![LED1_PIN, LED2_PIN], vec![Level::LOW, Level::LOW])?;
 
-    // Add event detection for button press (falling edge) with callback
+    // Add event detection for button press (falling edge) with callback.
+    // Callback receives the channel number that triggered (matches Python).
     gpio.add_event_detect(
         BUTTON_PIN,
         Edge::Falling,
-        Box::new(|| {
-            println!("Button pressed! Blink LED2");
+        Some(Box::new(|ch| {
+            println!("Button pressed on pin {ch}! Blink LED2");
             for _ in 0..5 {
                 println!("LED2 HIGH");
                 thread::sleep(Duration::from_millis(500));
                 println!("LED2 LOW");
                 thread::sleep(Duration::from_millis(500));
             }
-        }),
+        })),
         Some(Duration::from_millis(200)), // 200ms debounce
+        None,                             // default polltime (200ms, matches Python)
     )?;
 
     println!("Starting demo now! Press CTRL+C to exit");

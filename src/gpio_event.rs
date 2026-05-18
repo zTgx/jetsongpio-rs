@@ -20,12 +20,11 @@
 //!
 //! let mut gpio = GPIO::new();
 //! gpio.setmode(Mode::BOARD).unwrap();
-//! gpio.setup(vec![18], Direction::IN, None).unwrap();
+//! gpio.setup(vec![18], Direction::IN, None, None).unwrap();
 //!
-//! // Wait for button press (falling edge)
-//! let detected = gpio.wait_for_edge(18, Edge::Falling, None).unwrap();
-//! if detected {
-//!     println!("Button pressed!");
+//! // Wait for button press (falling edge), block forever
+//! if let Some(ch) = gpio.wait_for_edge(18, Edge::Falling, None).unwrap() {
+//!     println!("Button pressed on channel {ch}!");
 //! }
 //! ```
 
@@ -95,14 +94,22 @@ impl TryFrom<u32> for Edge {
     }
 }
 
+/// Callback signature for edge-detection events.
+///
+/// Receives the channel number (in the current pin numbering mode) that
+/// triggered. Matches Python's `lambda: callback(channel)` (gpio.py:431).
+pub type EdgeCallback = Box<dyn Fn(u32) + Send + Sync>;
+
 /// Internal GPIO event object
 struct GpioEventObject {
     /// File descriptor for the GPIO line
     value_fd: i32,
+    /// Channel number passed to callbacks (matches Python semantics)
+    channel: u32,
     /// Debounce time (None means no debounce)
     bouncetime: Option<Duration>,
     /// List of callback functions
-    callbacks: Vec<Box<dyn Fn() + Send>>,
+    callbacks: Vec<EdgeCallback>,
     /// Timestamp of last trigger (for debounce)
     last_call: Option<Instant>,
     /// Flag indicating if an event has occurred
@@ -114,9 +121,10 @@ struct GpioEventObject {
 }
 
 impl GpioEventObject {
-    fn new(fd: i32, bouncetime: Option<Duration>) -> Self {
+    fn new(fd: i32, channel: u32, bouncetime: Option<Duration>) -> Self {
         Self {
             value_fd: fd,
+            channel,
             bouncetime,
             callbacks: Vec::new(),
             last_call: None,
@@ -151,7 +159,7 @@ impl GpioEventObject {
     /// Trigger callbacks
     fn trigger_callbacks(&self) {
         for callback in &self.callbacks {
-            callback();
+            callback(self.channel);
         }
     }
 }
@@ -198,6 +206,9 @@ impl EventManager {
     /// * `channel` - GPIO channel/pin number
     /// * `fd` - File descriptor of the GPIO event line
     /// * `bouncetime` - Optional debounce time
+    /// * `polltime` - How long the handler thread waits per poll iteration
+    ///   before checking the shutdown flag. Smaller values shut down faster
+    ///   but use more CPU.
     ///
     /// # Returns
     ///
@@ -208,19 +219,21 @@ impl EventManager {
         channel: u32,
         fd: i32,
         bouncetime: Option<Duration>,
+        polltime: Duration,
     ) -> Result<()> {
         if self.event_added(chip_name, channel) {
             return Err(anyhow!("Event is already added for channel {}", channel));
         }
 
-        let gpio_obj = Arc::new(Mutex::new(GpioEventObject::new(fd, bouncetime)));
+        let gpio_obj = Arc::new(Mutex::new(GpioEventObject::new(fd, channel, bouncetime)));
 
         // Start event handler thread (each thread creates its own Poll instance)
         let running = Arc::clone(&gpio_obj.lock().unwrap().thread_running);
+        *running.lock().unwrap() = true;
         let gpio_obj_clone = Arc::clone(&gpio_obj);
 
         let handle = thread::spawn(move || {
-            edge_handler(running, gpio_obj_clone, fd, channel);
+            edge_handler(running, gpio_obj_clone, fd, channel, polltime);
         });
 
         // Update thread info
@@ -233,6 +246,12 @@ impl EventManager {
             .insert((chip_name.to_string(), channel), gpio_obj);
 
         Ok(())
+    }
+
+    /// Returns true if the channel currently has edge detection registered.
+    /// Mirrors Python `gpio_event.gpio_event_added`.
+    pub fn is_event_added(&self, chip_name: &str, channel: u32) -> bool {
+        self.event_added(chip_name, channel)
     }
 
     /// Remove an edge detection event
@@ -273,12 +292,13 @@ impl EventManager {
     ///
     /// * `chip_name` - Name of the GPIO chip
     /// * `channel` - GPIO channel/pin number
-    /// * `callback` - Callback function to execute on event
+    /// * `callback` - Callback function to execute on event. Receives the
+    ///   channel number as its sole argument (matches Python semantics).
     pub fn add_callback(
         &mut self,
         chip_name: &str,
         channel: u32,
-        callback: Box<dyn Fn() + Send>,
+        callback: EdgeCallback,
     ) -> Result<()> {
         let key = (chip_name.to_string(), channel);
 
@@ -334,6 +354,7 @@ fn edge_handler(
     gpio_obj: Arc<Mutex<GpioEventObject>>,
     fd: i32,
     channel: u32,
+    polltime: Duration,
 ) {
     // Clean initial buffer - read any pending events
     let mut initial_buf = vec![0u8; std::mem::size_of::<GpioEventData>()];
@@ -374,7 +395,7 @@ fn edge_handler(
         }
 
         // Use mio poll (epoll under the hood) - efficient waiting
-        match poll.poll(&mut events, Some(Duration::from_millis(100))) {
+        match poll.poll(&mut events, Some(polltime)) {
             Ok(_) => {
                 if events.is_empty() {
                     // Timeout without event, check running state
@@ -434,7 +455,8 @@ fn edge_handler(
 /// * `chip_fd` - File descriptor of the GPIO chip
 /// * `request` - GpioEventRequest configuration (fd will be set)
 /// * `bouncetime` - Not used in blocking mode (kept for API compatibility)
-/// * `timeout` - Maximum time to wait for event
+/// * `timeout` - Maximum time to wait for event. `None` blocks forever
+///   (mirrors Python `select.select(.., None)`).
 ///
 /// # Returns
 ///
@@ -443,7 +465,7 @@ pub fn blocking_wait_for_edge(
     chip_fd: i32,
     request: &mut GpioEventRequest,
     bouncetime: Option<Duration>,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<bool> {
     // Configure the request
     request.handleflags = crate::gpio_cdev::GPIOHANDLE_REQUEST_INPUT;
@@ -489,16 +511,24 @@ pub fn blocking_wait_for_edge(
     let _ = bouncetime;
 
     loop {
-        let remaining = timeout.saturating_sub(start.elapsed());
-        if remaining.is_zero() {
-            unsafe {
-                libc::close(event_fd);
+        // `None` here means block forever — mirrors Python's
+        // `select.select([], [], [], None)` when timeout is None.
+        let remaining = match timeout {
+            Some(t) => {
+                let r = t.saturating_sub(start.elapsed());
+                if r.is_zero() {
+                    unsafe {
+                        libc::close(event_fd);
+                    }
+                    return Ok(false);
+                }
+                Some(r)
             }
-            return Ok(false);
-        }
+            None => None,
+        };
 
         // Use mio poll for efficient blocking wait
-        match poll.poll(&mut events, Some(remaining)) {
+        match poll.poll(&mut events, remaining) {
             Ok(_) => {
                 if events.is_empty() {
                     // Timeout
@@ -609,11 +639,13 @@ impl crate::GPIO {
     ///
     /// * `channel` - GPIO channel/pin number
     /// * `edge` - Edge type to detect (Rising, Falling, or Both)
-    /// * `timeout` - Maximum time to wait for event (None = infinite wait)
+    /// * `timeout` - Maximum time to wait for event. `None` blocks forever
+    ///   (matches Python `wait_for_edge(channel, edge, timeout=None)`).
     ///
     /// # Returns
     ///
-    /// * `Result<bool>` - True if event was detected, false on timeout
+    /// * `Result<Option<u32>>` - `Some(channel)` on detection, `None` on
+    ///   timeout. Mirrors Python's `wait_for_edge` return value.
     ///
     /// # Example
     ///
@@ -623,12 +655,11 @@ impl crate::GPIO {
     ///
     /// let mut gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();
-    /// gpio.setup(vec![18], Direction::IN, None).unwrap();
+    /// gpio.setup(vec![18], Direction::IN, None, None).unwrap();
     ///
-    /// // Wait for button press (falling edge)
-    /// let detected = gpio.wait_for_edge(18, Edge::Falling, None).unwrap();
-    /// if detected {
-    ///     println!("Button pressed!");
+    /// // Wait for button press (falling edge), block forever
+    /// if let Some(ch) = gpio.wait_for_edge(18, Edge::Falling, None).unwrap() {
+    ///     println!("Button pressed on channel {ch}!");
     /// }
     /// ```
     pub fn wait_for_edge(
@@ -636,7 +667,7 @@ impl crate::GPIO {
         channel: u32,
         edge: Edge,
         timeout: Option<Duration>,
-    ) -> Result<bool> {
+    ) -> Result<Option<u32>> {
         // Get channel info to find chip and line offset
         let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
         let channel_data = self
@@ -664,29 +695,37 @@ impl crate::GPIO {
 
         let chip_fd_raw = chip_fd.as_raw_fd();
 
+        // Mirror Python gpio.py:509-510 — close any existing line handle so the
+        // kernel allows us to re-request it as an event line.
+        if let Some(setup_ch_info) = self.channel_data.get_mut(&channel) {
+            if let Some(line_handle) = setup_ch_info.line_handle.take() {
+                let _ = crate::gpio_cdev::close_line(Some(line_handle));
+            }
+        }
+
         // Create event request
         let mut request = request_event(ch_info.line_offset, u32::from(edge), "jetsongpio-rs")?;
 
-        // Use default timeout of 10 seconds if not specified
-        let timeout = timeout.unwrap_or(Duration::from_secs(10));
-
-        // Wait for edge event
+        // Wait for edge event. `None` propagates as "block forever".
         let detected = blocking_wait_for_edge(chip_fd_raw, &mut request, None, timeout)?;
 
-        Ok(detected)
+        Ok(if detected { Some(channel) } else { None })
     }
 
-    /// Add event detection on a GPIO channel with callback (non-blocking)
+    /// Add event detection on a GPIO channel with optional callback (non-blocking).
     ///
-    /// This function sets up edge detection with a callback function that runs
-    /// when the edge is detected. Similar to Python's `GPIO.add_event_detect()`.
+    /// Mirrors Python `GPIO.add_event_detect(channel, edge, callback, bouncetime, polltime)`.
     ///
     /// # Arguments
     ///
     /// * `channel` - GPIO channel/pin number
     /// * `edge` - Edge type to detect (Rising, Falling, or Both)
-    /// * `callback` - Callback function to execute on event
-    /// * `bouncetime` - Optional debounce time
+    /// * `callback` - Callback to execute on event. Receives the channel
+    ///   number (matches Python `lambda: callback(channel)`). `None` registers
+    ///   detection without a callback; use [`Self::add_event_callback`] later.
+    /// * `bouncetime` - Optional debounce interval
+    /// * `polltime` - Per-iteration poll timeout in the handler thread. `None`
+    ///   uses 200 ms (matches Python's `polltime=0.2`).
     ///
     /// # Example
     ///
@@ -696,13 +735,14 @@ impl crate::GPIO {
     ///
     /// let mut gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();
-    /// gpio.setup(vec![18], Direction::IN, None).unwrap();
+    /// gpio.setup(vec![18], Direction::IN, None, None).unwrap();
     ///
     /// gpio.add_event_detect(
     ///     18,
     ///     Edge::Falling,
-    ///     Box::new(|| println!("Button pressed!")),
-    ///     Some(Duration::from_millis(200))
+    ///     Some(Box::new(|ch| println!("Button pressed on {ch}!"))),
+    ///     Some(Duration::from_millis(200)),
+    ///     None,
     /// ).unwrap();
     ///
     /// // Main program continues...
@@ -714,8 +754,9 @@ impl crate::GPIO {
         &mut self,
         channel: u32,
         edge: Edge,
-        callback: Box<dyn Fn() + Send>,
+        callback: Option<EdgeCallback>,
         bouncetime: Option<Duration>,
+        polltime: Option<Duration>,
     ) -> Result<()> {
         // Get channel info
         let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
@@ -749,21 +790,74 @@ impl crate::GPIO {
 
         let chip_fd_raw = chip_fd.as_raw_fd();
 
+        // Mirror Python gpio.py:424-425 — close existing line handle before
+        // requesting an event line, otherwise the kernel rejects the request.
+        if let Some(setup_ch_info) = self.channel_data.get_mut(&channel) {
+            if let Some(line_handle) = setup_ch_info.line_handle.take() {
+                let _ = crate::gpio_cdev::close_line(Some(line_handle));
+            }
+        }
+
         // Create and open event request
         let mut request = request_event(ch_info.line_offset, u32::from(edge), "jetsongpio-rs")?;
         let event_fd = open_event(chip_fd_raw, &mut request)?;
+
+        // Default polltime matches Python (gpio.py:400 polltime=0.2).
+        let polltime = polltime.unwrap_or(Duration::from_millis(200));
 
         // Add edge detection
         self.event_manager
             .as_mut()
             .unwrap()
-            .add_edge_detect(chip_name, channel, event_fd, bouncetime)?;
+            .add_edge_detect(chip_name, channel, event_fd, bouncetime, polltime)?;
 
-        // Add callback
-        self.event_manager
+        // Add callback if provided
+        if let Some(cb) = callback {
+            self.event_manager
+                .as_mut()
+                .unwrap()
+                .add_callback(chip_name, channel, cb)?;
+        }
+
+        // Mirror Python gpio.py:434 — give the handler thread a moment to
+        // come up and drain pre-existing edges, so the first real event isn't
+        // lost.
+        thread::sleep(Duration::from_secs(1));
+
+        Ok(())
+    }
+
+    /// Append an additional callback to an already-detecting channel.
+    ///
+    /// Mirrors Python `GPIO.add_event_callback`. Errors if detection was not
+    /// previously registered via [`Self::add_event_detect`].
+    pub fn add_event_callback(&mut self, channel: u32, callback: EdgeCallback) -> Result<()> {
+        let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
+        let channel_data = self
+            .channel_data_by_mode
+            .get(&mode)
+            .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
+
+        let ch_info = channel_data
+            .get(&channel)
+            .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
+
+        let chip_name = ch_info.gpio_chip.clone();
+        let manager = self
+            .event_manager
             .as_mut()
-            .unwrap()
-            .add_callback(chip_name, channel, callback)?;
+            .ok_or_else(|| anyhow!("Add event detection using add_event_detect first"))?;
+
+        if !manager.is_event_added(&chip_name, channel) {
+            return Err(anyhow!(
+                "Add event detection using add_event_detect first before adding a callback"
+            ));
+        }
+
+        manager.add_callback(&chip_name, channel, callback)?;
+
+        // Same wait-for-thread-startup as add_event_detect.
+        thread::sleep(Duration::from_secs(1));
 
         Ok(())
     }
@@ -776,7 +870,9 @@ impl crate::GPIO {
     /// # Arguments
     ///
     /// * `channel` - GPIO channel/pin number
-    pub fn remove_event_detect(&mut self, channel: u32) -> Result<()> {
+    /// * `timeout` - How long to wait for the handler thread to exit. `None`
+    ///   uses 500 ms (matches Python's `timeout=0.5`).
+    pub fn remove_event_detect(&mut self, channel: u32, timeout: Option<Duration>) -> Result<()> {
         // Get channel info to find chip name
         let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
         let channel_data = self
@@ -790,9 +886,11 @@ impl crate::GPIO {
 
         let chip_name = &ch_info.gpio_chip;
 
+        let timeout = timeout.unwrap_or(Duration::from_millis(500));
+
         // Remove event detection
         if let Some(ref mut manager) = self.event_manager {
-            manager.event_cleanup(chip_name, channel);
+            let _ = manager.remove_edge_detect(chip_name, channel, timeout);
         }
 
         Ok(())
