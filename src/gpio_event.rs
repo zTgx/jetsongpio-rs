@@ -18,7 +18,7 @@
 //! use jetsongpio::gpio_event::{blocking_wait_for_edge, request_event, open_event};
 //! use std::time::Duration;
 //!
-//! let mut gpio = GPIO::new();
+//! let gpio = GPIO::new();
 //! gpio.setmode(Mode::BOARD).unwrap();
 //! gpio.setup(vec![18], Direction::IN, None, None).unwrap();
 //!
@@ -269,18 +269,36 @@ impl EventManager {
     ) -> Result<()> {
         let key = (chip_name.to_string(), channel);
 
-        if let Some(gpio_obj) = self.event_list.get(&key) {
-            // Stop the thread
-            {
-                let obj = gpio_obj.lock().unwrap();
+        if let Some(gpio_obj) = self.event_list.remove(&key) {
+            // Signal the thread to stop and take the JoinHandle.
+            let handle = {
+                let mut obj = gpio_obj.lock().unwrap();
                 *obj.thread_running.lock().unwrap() = false;
+                obj.thread_handle.take()
+            };
+
+            // Join the thread with a timeout.
+            if let Some(handle) = handle {
+                let start = Instant::now();
+                // Spin-join with timeout so we don't block forever.
+                loop {
+                    if handle.is_finished() {
+                        let _ = handle.join();
+                        break;
+                    }
+                    if start.elapsed() >= timeout {
+                        // Thread did not exit in time; it will detach on drop.
+                        eprintln!(
+                            "Warning: event handler thread for channel {} did not exit within timeout",
+                            channel
+                        );
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
             }
-
-            // Wait for thread to exit
-            thread::sleep(timeout);
-
-            // Remove from event list
-            self.event_list.remove(&key);
+            // gpio_obj Arc dropped here; if the thread holds the last Arc,
+            // GpioEventObject::Drop will close value_fd after the thread exits.
         }
 
         Ok(())
@@ -653,7 +671,7 @@ impl crate::GPIO {
     /// use jetsongpio::{GPIO, Direction, Edge, Mode};
     /// use std::time::Duration;
     ///
-    /// let mut gpio = GPIO::new();
+    /// let gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();
     /// gpio.setup(vec![18], Direction::IN, None, None).unwrap();
     ///
@@ -663,50 +681,49 @@ impl crate::GPIO {
     /// }
     /// ```
     pub fn wait_for_edge(
-        &mut self,
+        &self,
         channel: u32,
         edge: Edge,
         timeout: Option<Duration>,
     ) -> Result<Option<u32>> {
-        // Get channel info to find chip and line offset
-        let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
-        let channel_data = self
-            .channel_data_by_mode
-            .get(&mode)
-            .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
+        let (chip_fd_raw, ch_info_line_offset) = {
+            let mut inner = self.inner();
+            let mode = inner
+                .gpio_mode
+                .ok_or_else(|| anyhow!("GPIO mode not set"))?;
+            let channel_data = self
+                .channel_data_by_mode
+                .get(&mode)
+                .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
 
-        let ch_info = channel_data
-            .get(&channel)
-            .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
+            let ch_info = channel_data
+                .get(&channel)
+                .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
 
-        if ch_info.gpio_chip.is_empty() {
-            return Err(anyhow!("Channel {} is not a GPIO", channel));
-        }
+            if ch_info.gpio_chip.is_empty() {
+                return Err(anyhow!("Channel {} is not a GPIO", channel));
+            }
 
-        // Open the chip
-        let chip_name = &ch_info.gpio_chip;
-        let chip_fd = if !self.chip_fd_map.contains_key(chip_name) {
-            let fd = chip_open_by_label(chip_name)?;
-            self.chip_fd_map.insert(chip_name.clone(), fd);
-            self.chip_fd_map.get(chip_name).unwrap().try_clone()?
-        } else {
-            self.chip_fd_map.get(chip_name).unwrap().try_clone()?
+            let chip_name = &ch_info.gpio_chip;
+            let chip_fd = if !inner.chip_fd_map.contains_key(chip_name) {
+                let fd = chip_open_by_label(chip_name)?;
+                inner.chip_fd_map.insert(chip_name.clone(), fd);
+                inner.chip_fd_map.get(chip_name).unwrap().try_clone()?
+            } else {
+                inner.chip_fd_map.get(chip_name).unwrap().try_clone()?
+            };
+
+            // Close any existing line handle so the kernel allows re-request as event line.
+            if let Some(setup_ch_info) = inner.channel_data.get_mut(&channel) {
+                if let Some(line_handle) = setup_ch_info.line_handle.take() {
+                    let _ = crate::gpio_cdev::close_line(Some(line_handle));
+                }
+            }
+
+            (chip_fd.as_raw_fd(), ch_info.line_offset)
         };
 
-        let chip_fd_raw = chip_fd.as_raw_fd();
-
-        // Mirror Python gpio.py:509-510 — close any existing line handle so the
-        // kernel allows us to re-request it as an event line.
-        if let Some(setup_ch_info) = self.channel_data.get_mut(&channel) {
-            if let Some(line_handle) = setup_ch_info.line_handle.take() {
-                let _ = crate::gpio_cdev::close_line(Some(line_handle));
-            }
-        }
-
-        // Create event request
-        let mut request = request_event(ch_info.line_offset, u32::from(edge), "jetsongpio-rs")?;
-
-        // Wait for edge event. `None` propagates as "block forever".
+        let mut request = request_event(ch_info_line_offset, u32::from(edge), "jetsongpio-rs")?;
         let detected = blocking_wait_for_edge(chip_fd_raw, &mut request, None, timeout)?;
 
         Ok(if detected { Some(channel) } else { None })
@@ -733,7 +750,7 @@ impl crate::GPIO {
     /// use jetsongpio::{GPIO, Direction, Edge, Mode};
     /// use std::time::Duration;
     ///
-    /// let mut gpio = GPIO::new();
+    /// let gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();
     /// gpio.setup(vec![18], Direction::IN, None, None).unwrap();
     ///
@@ -751,77 +768,79 @@ impl crate::GPIO {
     /// }
     /// ```
     pub fn add_event_detect(
-        &mut self,
+        &self,
         channel: u32,
         edge: Edge,
         callback: Option<EdgeCallback>,
         bouncetime: Option<Duration>,
         polltime: Option<Duration>,
     ) -> Result<()> {
-        // Get channel info
-        let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
-        let channel_data = self
-            .channel_data_by_mode
-            .get(&mode)
-            .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
+        let (chip_fd_raw, ch_info_line_offset, chip_name) = {
+            let mut inner = self.inner();
+            let mode = inner
+                .gpio_mode
+                .ok_or_else(|| anyhow!("GPIO mode not set"))?;
+            let channel_data = self
+                .channel_data_by_mode
+                .get(&mode)
+                .ok_or_else(|| anyhow!("Invalid GPIO mode"))?;
 
-        let ch_info = channel_data
-            .get(&channel)
-            .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
+            let ch_info = channel_data
+                .get(&channel)
+                .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
 
-        if ch_info.gpio_chip.is_empty() {
-            return Err(anyhow!("Channel {} is not a GPIO", channel));
-        }
+            if ch_info.gpio_chip.is_empty() {
+                return Err(anyhow!("Channel {} is not a GPIO", channel));
+            }
 
-        // Initialize event manager if not exists
-        if self.event_manager.is_none() {
-            self.event_manager = Some(EventManager::new());
-        }
+            if inner.event_manager.is_none() {
+                inner.event_manager = Some(EventManager::new());
+            }
 
-        // Open the chip
-        let chip_name = &ch_info.gpio_chip;
-        let chip_fd = if !self.chip_fd_map.contains_key(chip_name) {
-            let fd = chip_open_by_label(chip_name)?;
-            self.chip_fd_map.insert(chip_name.clone(), fd);
-            self.chip_fd_map.get(chip_name).unwrap().try_clone()?
-        } else {
-            self.chip_fd_map.get(chip_name).unwrap().try_clone()?
+            let chip_name = ch_info.gpio_chip.clone();
+            let chip_fd = if !inner.chip_fd_map.contains_key(&chip_name) {
+                let fd = chip_open_by_label(&chip_name)?;
+                inner.chip_fd_map.insert(chip_name.clone(), fd);
+                inner.chip_fd_map.get(&chip_name).unwrap().try_clone()?
+            } else {
+                inner.chip_fd_map.get(&chip_name).unwrap().try_clone()?
+            };
+
+            // Close existing line handle before requesting an event line.
+            if let Some(setup_ch_info) = inner.channel_data.get_mut(&channel) {
+                if let Some(line_handle) = setup_ch_info.line_handle.take() {
+                    let _ = crate::gpio_cdev::close_line(Some(line_handle));
+                }
+            }
+
+            (chip_fd.as_raw_fd(), ch_info.line_offset, chip_name)
         };
 
-        let chip_fd_raw = chip_fd.as_raw_fd();
+        // Open event line (ioctl — lock is released so other threads aren't
+        // blocked during the kernel call).
+        let mut request = request_event(ch_info_line_offset, u32::from(edge), "jetsongpio-rs")?;
+        let event_fd = open_event(chip_fd_raw, &mut request)?;
 
-        // Mirror Python gpio.py:424-425 — close existing line handle before
-        // requesting an event line, otherwise the kernel rejects the request.
-        if let Some(setup_ch_info) = self.channel_data.get_mut(&channel) {
-            if let Some(line_handle) = setup_ch_info.line_handle.take() {
-                let _ = crate::gpio_cdev::close_line(Some(line_handle));
+        let polltime = polltime.unwrap_or(Duration::from_millis(200));
+
+        {
+            let mut inner = self.inner();
+            inner
+                .event_manager
+                .as_mut()
+                .unwrap()
+                .add_edge_detect(&chip_name, channel, event_fd, bouncetime, polltime)?;
+
+            if let Some(cb) = callback {
+                inner
+                    .event_manager
+                    .as_mut()
+                    .unwrap()
+                    .add_callback(&chip_name, channel, cb)?;
             }
         }
 
-        // Create and open event request
-        let mut request = request_event(ch_info.line_offset, u32::from(edge), "jetsongpio-rs")?;
-        let event_fd = open_event(chip_fd_raw, &mut request)?;
-
-        // Default polltime matches Python (gpio.py:400 polltime=0.2).
-        let polltime = polltime.unwrap_or(Duration::from_millis(200));
-
-        // Add edge detection
-        self.event_manager
-            .as_mut()
-            .unwrap()
-            .add_edge_detect(chip_name, channel, event_fd, bouncetime, polltime)?;
-
-        // Add callback if provided
-        if let Some(cb) = callback {
-            self.event_manager
-                .as_mut()
-                .unwrap()
-                .add_callback(chip_name, channel, cb)?;
-        }
-
-        // Mirror Python gpio.py:434 — give the handler thread a moment to
-        // come up and drain pre-existing edges, so the first real event isn't
-        // lost.
+        // Give the handler thread a moment to come up and drain pre-existing edges.
         thread::sleep(Duration::from_secs(1));
 
         Ok(())
@@ -831,8 +850,11 @@ impl crate::GPIO {
     ///
     /// Mirrors Python `GPIO.add_event_callback`. Errors if detection was not
     /// previously registered via [`Self::add_event_detect`].
-    pub fn add_event_callback(&mut self, channel: u32, callback: EdgeCallback) -> Result<()> {
-        let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
+    pub fn add_event_callback(&self, channel: u32, callback: EdgeCallback) -> Result<()> {
+        let mut inner = self.inner();
+        let mode = inner
+            .gpio_mode
+            .ok_or_else(|| anyhow!("GPIO mode not set"))?;
         let channel_data = self
             .channel_data_by_mode
             .get(&mode)
@@ -843,7 +865,7 @@ impl crate::GPIO {
             .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
 
         let chip_name = ch_info.gpio_chip.clone();
-        let manager = self
+        let manager = inner
             .event_manager
             .as_mut()
             .ok_or_else(|| anyhow!("Add event detection using add_event_detect first"))?;
@@ -857,6 +879,7 @@ impl crate::GPIO {
         manager.add_callback(&chip_name, channel, callback)?;
 
         // Same wait-for-thread-startup as add_event_detect.
+        drop(inner);
         thread::sleep(Duration::from_secs(1));
 
         Ok(())
@@ -872,9 +895,11 @@ impl crate::GPIO {
     /// * `channel` - GPIO channel/pin number
     /// * `timeout` - How long to wait for the handler thread to exit. `None`
     ///   uses 500 ms (matches Python's `timeout=0.5`).
-    pub fn remove_event_detect(&mut self, channel: u32, timeout: Option<Duration>) -> Result<()> {
-        // Get channel info to find chip name
-        let mode = self.gpio_mode.ok_or_else(|| anyhow!("GPIO mode not set"))?;
+    pub fn remove_event_detect(&self, channel: u32, timeout: Option<Duration>) -> Result<()> {
+        let mut inner = self.inner();
+        let mode = inner
+            .gpio_mode
+            .ok_or_else(|| anyhow!("GPIO mode not set"))?;
         let channel_data = self
             .channel_data_by_mode
             .get(&mode)
@@ -885,11 +910,9 @@ impl crate::GPIO {
             .ok_or_else(|| anyhow!("Invalid channel: {}", channel))?;
 
         let chip_name = &ch_info.gpio_chip;
-
         let timeout = timeout.unwrap_or(Duration::from_millis(500));
 
-        // Remove event detection
-        if let Some(ref mut manager) = self.event_manager {
+        if let Some(ref mut manager) = inner.event_manager {
             let _ = manager.remove_edge_detect(chip_name, channel, timeout);
         }
 
@@ -908,9 +931,10 @@ impl crate::GPIO {
     /// # Returns
     ///
     /// * `bool` - True if an event was detected, false otherwise
-    pub fn event_detected(&mut self, channel: u32) -> bool {
-        // Get channel info to find chip name
-        let mode = match self.gpio_mode {
+    pub fn event_detected(&self, channel: u32) -> bool {
+        let mut inner = self.inner();
+
+        let mode = match inner.gpio_mode {
             Some(m) => m,
             None => return false,
         };
@@ -927,8 +951,7 @@ impl crate::GPIO {
 
         let chip_name = &ch_info.gpio_chip;
 
-        // Check if event was detected
-        if let Some(ref mut manager) = self.event_manager {
+        if let Some(ref mut manager) = inner.event_manager {
             manager.edge_event_detected(chip_name, channel)
         } else {
             false

@@ -142,7 +142,7 @@ fn run_pinmux_lookup(gpio_pin: u32) -> Result<(), CliError> {
 }
 
 fn run_high(pin: u32) -> Result<(), CliError> {
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
     gpio.setmode(Mode::BOARD)?;
     gpio.setup(vec![pin], Direction::OUT, Some(Level::HIGH), None)?;
     println!("GPIO Pin {} set to HIGH", pin);
@@ -150,7 +150,7 @@ fn run_high(pin: u32) -> Result<(), CliError> {
 }
 
 fn run_low(pin: u32) -> Result<(), CliError> {
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
     gpio.setmode(Mode::BOARD)?;
     gpio.setup(vec![pin], Direction::OUT, Some(Level::LOW), None)?;
     println!("GPIO Pin {} set to LOW", pin);
@@ -158,7 +158,7 @@ fn run_low(pin: u32) -> Result<(), CliError> {
 }
 
 fn run_setup(pin: u32, direction: DirectionArg, initial: Option<LevelArg>) -> Result<(), CliError> {
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
     gpio.setmode(Mode::BOARD)?;
     let initial_level = initial.map(|l| l.into());
     gpio.setup(vec![pin], direction.into(), initial_level, None)?;
@@ -177,7 +177,7 @@ fn run_set(pin: u32, value: LevelArg) -> Result<(), CliError> {
     // CLI invocations are stateless — there is no persistent setup() from a
     // previous run, so calling output() alone would fail with "channel not
     // set up as OUTPUT". Setup + output in one shot, identical to high/low.
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
     gpio.setmode(Mode::BOARD)?;
     let level: Level = value.into();
     gpio.setup(vec![pin], Direction::OUT, Some(level), None)?;
@@ -186,7 +186,7 @@ fn run_set(pin: u32, value: LevelArg) -> Result<(), CliError> {
 }
 
 fn run_read(pin: u32) -> Result<(), CliError> {
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
     gpio.setmode(Mode::BOARD)?;
     let level = gpio.input(pin)?;
     println!("GPIO Pin {} = {:?}", pin, level);
@@ -194,7 +194,7 @@ fn run_read(pin: u32) -> Result<(), CliError> {
 }
 
 fn run_cleanup(pin: Option<u32>) -> Result<(), CliError> {
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
     gpio.setmode(Mode::BOARD)?;
     match pin {
         Some(p) => {

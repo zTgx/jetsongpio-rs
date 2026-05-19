@@ -10,7 +10,7 @@
 //! ```no_run
 //! use jetsongpio::{GPIO, Direction, Level, Mode};
 //!
-//! let mut gpio = GPIO::new();
+//! let gpio = GPIO::new();
 //! gpio.setmode(Mode::BOARD)?;
 //! gpio.setup(vec![18], Direction::OUT, Some(Level::LOW), None)?;
 //! gpio.output(vec![18], vec![Level::HIGH])?;

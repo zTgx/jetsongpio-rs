@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub struct ChannelInfo {
@@ -269,7 +270,7 @@ fn matches_any(compatibles: &[String], patterns: &[&str]) -> bool {
     })
 }
 
-static mut WARNED: bool = false;
+static WARNED: AtomicBool = AtomicBool::new(false);
 
 fn warn_if_not_carrier_board(carrier_boards: &[&str]) -> Result<(), String> {
     let mut found = false;
@@ -284,15 +285,12 @@ fn warn_if_not_carrier_board(carrier_boards: &[&str]) -> Result<(), String> {
     }
 
     if !found {
-        unsafe {
-            if !WARNED {
-                WARNED = true;
-                eprintln!(
-                    "WARNING: Carrier board is not from a Jetson Developer Kit.\n\
-                     WARNING: Jetson.GPIO library has not been verified with this carrier board,\n\
-                     WARNING: and in fact is unlikely to work correctly."
-                );
-            }
+        if !WARNED.swap(true, Ordering::SeqCst) {
+            eprintln!(
+                "WARNING: Carrier board is not from a Jetson Developer Kit.\n\
+                 WARNING: Jetson.GPIO library has not been verified with this carrier board,\n\
+                 WARNING: and in fact is unlikely to work correctly."
+            );
         }
     }
 

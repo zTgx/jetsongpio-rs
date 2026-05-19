@@ -1,10 +1,14 @@
 use crate::gpio_cdev::*;
 use crate::gpio_pin_data::{ChannelInfo, JetsonInfo, Mode, get_data};
 use anyhow::Error;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::os::fd::AsRawFd;
-use std::{collections::HashMap, fs::OpenOptions, path::Path, thread, time::Duration};
+use std::path::Path;
+use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
 // GPIO character device constants
 const GPIOHANDLE_REQUEST_INPUT: u32 = 0x1;
@@ -23,7 +27,7 @@ const GPIOHANDLE_REQUEST_OUTPUT: u32 = 0x2;
 /// ```rust
 /// use jetsongpio::{GPIO, Level, Direction, Mode};
 ///
-/// let mut gpio = GPIO::new();
+/// let gpio = GPIO::new();
 /// gpio.setmode(Mode::BOARD).unwrap();
 ///
 /// gpio.setup(vec![7, 11], Direction::OUT, None, None).unwrap();
@@ -50,7 +54,7 @@ pub enum Level {
 /// ```rust
 /// use jetsongpio::{GPIO, Direction};
 ///
-/// let mut gpio = GPIO::new();
+/// let gpio = GPIO::new();
 ///
 /// gpio.setup(vec![7], Direction::OUT, None, None).unwrap();
 /// ```
@@ -87,7 +91,6 @@ impl Direction {
 }
 
 fn check_write_access() -> Result<(), Error> {
-    // Check if /dev/gpiochip0 exists (GPIO character device)
     let gpiochip_path = "/dev/gpiochip0";
     if !Path::new(gpiochip_path).exists() {
         return Err(Error::msg(
@@ -95,10 +98,8 @@ fn check_write_access() -> Result<(), Error> {
         ));
     }
 
-    // Check if the current user has permissions to access the device
     if !Path::new(gpiochip_path).metadata().is_ok_and(|_m| {
-        // Basic check: if we can access the device file
-        OpenOptions::new()
+        std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(gpiochip_path)
@@ -111,102 +112,21 @@ fn check_write_access() -> Result<(), Error> {
     Ok(())
 }
 
-/// A public struct that holds state information about the GPIO pins.
-///
-/// Public fields:
-/// * `model` - The model of the Jetson board
-/// * `jetson_info` - A `JetsonInfo` struct that holds information about the Jetson board
-///
-/// # Example
-///
-/// ```rust
-/// use jetsongpio::GPIO;
-///
-/// let gpio = GPIO::new();
-/// ```
-pub struct GPIO {
-    pub model: String,
-    pub jetson_info: JetsonInfo,
-    pub channel_data_by_mode: HashMap<Mode, HashMap<u32, ChannelInfo>>,
+// ---------------------------------------------------------------------------
+// GpioInner — mutable state protected by Mutex for thread safety
+// ---------------------------------------------------------------------------
 
-    // # Dictionary objects used as lookup tables for pin to linux gpio mapping
-    pub channel_data: HashMap<u32, ChannelInfo>,
-
-    pub gpio_warnings: bool,
-    pub gpio_mode: Option<Mode>,
-    pub channel_configuration: HashMap<u32, Direction>,
-
-    // Dictionary used as a lookup table from GPIO chip name to chip fd
-    pub chip_fd_map: HashMap<String, std::fs::File>,
-
-    // Event manager for edge detection
-    pub event_manager: Option<crate::gpio_event::EventManager>,
+/// Mutable inner state of `GPIO`, protected by a `Mutex` for thread safety.
+pub(crate) struct GpioInner {
+    pub(crate) channel_data: HashMap<u32, ChannelInfo>,
+    pub(crate) gpio_warnings: bool,
+    pub(crate) gpio_mode: Option<Mode>,
+    pub(crate) channel_configuration: HashMap<u32, Direction>,
+    pub(crate) chip_fd_map: HashMap<String, File>,
+    pub(crate) event_manager: Option<crate::gpio_event::EventManager>,
 }
 
-impl GPIO {
-    /// Creates a new `GPIO` object.
-    ///
-    /// Calling this function will automatically populate the `model` and `jetson_info` fields.
-    pub fn new() -> Self {
-        let (model, jetson_info, channel_data_by_mode) = get_data();
-
-        GPIO {
-            model,
-            jetson_info,
-            channel_data_by_mode,
-
-            channel_data: HashMap::new(),
-
-            gpio_warnings: true,
-            gpio_mode: None,
-            channel_configuration: HashMap::new(),
-            chip_fd_map: HashMap::new(),
-            event_manager: None,
-        }
-    }
-
-    /// Enable or disable warnings during setup and cleanup.
-    ///
-    /// # Arguments
-    ///
-    /// * `warnings` - `true` to enable warnings, `false` to disable warnings
-    pub fn setwarnings(&mut self, warnings: bool) {
-        self.gpio_warnings = warnings;
-    }
-
-    /// Sets the pin numbering mode.
-    ///
-    /// Possible mode values are
-    /// * `Mode::BOARD`
-    /// * `Mode::BCM`
-    ///
-    /// # Arguments
-    ///
-    /// * `mode` - The pin numbering mode to use
-    pub fn setmode(&mut self, mode: Mode) -> Result<(), Error> {
-        // check if a different mode has been set already
-        if let Some(ref current_mode) = self.gpio_mode {
-            if *current_mode != mode {
-                return Err(Error::msg("A different mode has already been set!"));
-            }
-        }
-
-        // check if mode parameter is valid
-        if !mode.is_valid() {
-            return Err(Error::msg("An invalid mode was passed to setmode!"));
-        }
-
-        self.channel_data = self.channel_data_by_mode.get(&mode).unwrap().clone();
-        self.gpio_mode = Some(mode);
-
-        Ok(())
-    }
-
-    /// Returns the currently set pin numbering mode as an `Option<Mode>`.
-    pub fn getmode(&self) -> Option<Mode> {
-        self.gpio_mode.clone()
-    }
-
+impl GpioInner {
     fn validate_mode_set(&self) -> Result<(), Error> {
         match self.gpio_mode {
             Some(_) => Ok(()),
@@ -263,14 +183,10 @@ impl GPIO {
         for channel in channels {
             ret.push(self.channel_to_info_lookup(channel, need_gpio, need_pwm)?);
         }
-
         Ok(ret)
     }
 
     fn app_channel_configuration(&self, ch_info: &ChannelInfo) -> Option<Direction> {
-        // """Return the current configuration of a channel as requested by this
-        // module in this process. Any of IN, OUT, or None may be returned."""
-
         self.channel_configuration.get(&ch_info.channel).copied()
     }
 
@@ -319,8 +235,6 @@ impl GPIO {
                 pwm_unexport(&ch_info).ok();
             }
             _ => {
-                // Mirror Python gpio.py:_cleanup_one — also tear down any edge
-                // detection registered on this channel before closing the line.
                 if let Some(ref mut manager) = self.event_manager {
                     manager.event_cleanup(&ch_info.gpio_chip, ch_info.channel);
                 }
@@ -331,20 +245,17 @@ impl GPIO {
         }
         self.channel_configuration.remove(&ch_info.channel);
 
-        // Drop our reference to this chip's fd if it's no longer needed.
         if let Some(chip_fd) = self.chip_fd_map.remove(&ch_info.gpio_chip) {
             let _ = close_chip(Some(chip_fd));
         }
     }
 
     fn cleanup_all(&mut self) -> Result<(), Error> {
-        // Iterate channels first (Python order). Each cleanup_one closes its chip fd.
         let ch_infos_to_cleanup: Vec<ChannelInfo> = self.channel_data.values().cloned().collect();
         for ch_info in ch_infos_to_cleanup {
             self.cleanup_one(ch_info);
         }
 
-        // Sweep any chip fds that weren't claimed by a channel (defensive).
         for (_chip_name, chip_fd) in self.chip_fd_map.drain() {
             let _ = close_chip(Some(chip_fd));
         }
@@ -367,6 +278,115 @@ impl GPIO {
     fn setup_single_in(&mut self, ch_info: ChannelInfo, consumer: &str) -> Result<(), Error> {
         self.do_one_channel(ch_info, Direction::IN.to_cdev(), None, consumer)
     }
+}
+
+// ---------------------------------------------------------------------------
+// GPIO — thread-safe public struct
+// ---------------------------------------------------------------------------
+
+/// A thread-safe struct that holds state information about the GPIO pins.
+///
+/// Public fields:
+/// * `model` - The model of the Jetson board
+/// * `jetson_info` - A `JetsonInfo` struct that holds information about the Jetson board
+///
+/// # Example
+///
+/// ```rust
+/// use jetsongpio::GPIO;
+///
+/// let gpio = GPIO::new();
+/// ```
+pub struct GPIO {
+    /// Model name of the Jetson board (immutable after construction).
+    pub model: String,
+    /// Board identification info (immutable after construction).
+    pub jetson_info: JetsonInfo,
+    /// Static pin mapping tables keyed by Mode (immutable after construction;
+    /// only read via `channel_data_by_mode.get()` — no mutation).
+    pub channel_data_by_mode: HashMap<Mode, HashMap<u32, ChannelInfo>>,
+    /// Mutable state protected by a Mutex for thread safety.
+    inner: Mutex<GpioInner>,
+}
+
+// Safety: All mutable state is inside `Mutex<GpioInner>` which provides safe
+// interior mutability. The immutable fields (`model`, `jetson_info`,
+// `channel_data_by_mode`) are never modified after construction.
+// `channel_data_by_mode` contains `ChannelInfo` which has an `f_duty_cycle:
+// Option<File>` field, but those files are always `None` in the static tables
+// (see `Clone` impl in `gpio_pin_data.rs`). The `File` inside `chip_fd_map`
+// and `f_duty_cycle` (when present) are only accessed while holding the Mutex,
+// so concurrent access is safe.
+unsafe impl Sync for GPIO {}
+
+impl GPIO {
+    /// Creates a new `GPIO` object.
+    ///
+    /// Calling this function will automatically populate the `model` and `jetson_info` fields.
+    pub fn new() -> Self {
+        let (model, jetson_info, channel_data_by_mode) = get_data();
+
+        GPIO {
+            model,
+            jetson_info,
+            channel_data_by_mode,
+            inner: Mutex::new(GpioInner {
+                channel_data: HashMap::new(),
+                gpio_warnings: true,
+                gpio_mode: None,
+                channel_configuration: HashMap::new(),
+                chip_fd_map: HashMap::new(),
+                event_manager: None,
+            }),
+        }
+    }
+
+    /// Lock the inner state and return a MutexGuard.
+    pub(crate) fn inner(&self) -> std::sync::MutexGuard<'_, GpioInner> {
+        self.inner.lock().unwrap()
+    }
+
+    /// Enable or disable warnings during setup and cleanup.
+    ///
+    /// # Arguments
+    ///
+    /// * `warnings` - `true` to enable warnings, `false` to disable warnings
+    pub fn setwarnings(&self, warnings: bool) {
+        self.inner().gpio_warnings = warnings;
+    }
+
+    /// Sets the pin numbering mode.
+    ///
+    /// Possible mode values are
+    /// * `Mode::BOARD`
+    /// * `Mode::BCM`
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - The pin numbering mode to use
+    pub fn setmode(&self, mode: Mode) -> Result<(), Error> {
+        let mut inner = self.inner();
+
+        if let Some(ref current_mode) = inner.gpio_mode {
+            if *current_mode != mode {
+                return Err(Error::msg("A different mode has already been set!"));
+            }
+        }
+
+        if !mode.is_valid() {
+            return Err(Error::msg("An invalid mode was passed to setmode!"));
+        }
+
+        inner.channel_data = self.channel_data_by_mode.get(&mode).unwrap().clone();
+        inner.gpio_mode = Some(mode);
+
+        Ok(())
+    }
+
+    /// Returns the currently set pin numbering mode as an `Option<Mode>`.
+    pub fn getmode(&self) -> Option<Mode> {
+        self.inner().gpio_mode
+    }
 
     /// Setup a channel or list of channels with a direction and (optional) pull/up down control and (optional) initial value.
     ///
@@ -382,12 +402,12 @@ impl GPIO {
     /// ```rust
     /// use jetsongpio::{GPIO, Direction, Mode};
     ///
-    /// let mut gpio = GPIO::new();
+    /// let gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();
     /// gpio.setup(vec![7], Direction::OUT, None, None).unwrap();
     /// ```
     pub fn setup(
-        &mut self,
+        &self,
         channels: Vec<u32>,
         direction: Direction,
         initial: Option<Level>,
@@ -395,29 +415,27 @@ impl GPIO {
     ) -> Result<(), Error> {
         check_write_access()?;
 
-        let ch_infos = self.channels_to_infos(channels, true, false)?;
+        let mut inner = self.inner();
+        let ch_infos = inner.channels_to_infos(channels, true, false)?;
 
-        // check direction is valid
         if !direction.is_valid() {
             return Err(Error::msg("An invalid direction was passed to setup()"));
         }
 
         let consumer = consumer.unwrap_or("jetsongpio-rs");
 
-        // Clone needed data before mutating self
         let ch_infos_owned: Vec<ChannelInfo> = ch_infos.iter().map(|&ch| ch.clone()).collect();
 
-        // cleanup if the channel is already setup
         for ch_info in ch_infos_owned.iter() {
-            if self.channel_configuration.contains_key(&ch_info.channel) {
-                self.cleanup_one(ch_info.clone());
+            if inner.channel_configuration.contains_key(&ch_info.channel) {
+                inner.cleanup_one(ch_info.clone());
             }
         }
 
         match direction {
             Direction::OUT => {
                 for ch_info in ch_infos_owned {
-                    self.setup_single_out(ch_info, initial, consumer)?;
+                    inner.setup_single_out(ch_info, initial, consumer)?;
                 }
             }
             Direction::IN => {
@@ -425,7 +443,7 @@ impl GPIO {
                     return Err(Error::msg("initial parameter is not valid for inputs"));
                 }
                 for ch_info in ch_infos_owned {
-                    self.setup_single_in(ch_info, consumer)?;
+                    inner.setup_single_in(ch_info, consumer)?;
                 }
             }
             _ => {
@@ -441,10 +459,11 @@ impl GPIO {
     /// # Arguments
     ///
     /// * `channels` - An optional list of channels to cleanup. If no channel is provided, all channels are cleaned.
-    pub fn cleanup(&mut self, channels: Option<Vec<u32>>) -> Result<(), Error> {
-        // warn if no channel is setup
-        if self.gpio_mode.is_none() {
-            if self.gpio_warnings {
+    pub fn cleanup(&self, channels: Option<Vec<u32>>) -> Result<(), Error> {
+        let mut inner = self.inner();
+
+        if inner.gpio_mode.is_none() {
+            if inner.gpio_warnings {
                 println!(
                     "No channels have been set up yet - nothing to clean up! Try cleaning up at the end of your program instead!"
                 );
@@ -452,17 +471,16 @@ impl GPIO {
             return Ok(());
         }
 
-        // clean all channels if no channel param provided
         if channels.is_none() {
-            self.cleanup_all()?;
+            inner.cleanup_all()?;
             return Ok(());
         }
 
-        let ch_infos = self.channels_to_infos(channels.unwrap(), false, false)?;
+        let ch_infos = inner.channels_to_infos(channels.unwrap(), false, false)?;
         let channels_to_cleanup: Vec<u32> = ch_infos
             .iter()
             .filter_map(|ch_info| {
-                if self.channel_configuration.contains_key(&ch_info.channel) {
+                if inner.channel_configuration.contains_key(&ch_info.channel) {
                     Some(ch_info.channel)
                 } else {
                     None
@@ -471,8 +489,8 @@ impl GPIO {
             .collect();
 
         for channel in channels_to_cleanup {
-            if let Some(ch_info) = self.channel_data.get(&channel).cloned() {
-                self.cleanup_one(ch_info);
+            if let Some(ch_info) = inner.channel_data.get(&channel).cloned() {
+                inner.cleanup_one(ch_info);
             }
         }
 
@@ -487,16 +505,21 @@ impl GPIO {
     ///
     /// * `channel` - The channel to read from.
     pub fn input(&self, channel: u32) -> Result<Level, Error> {
-        let ch_info = self.channel_to_info(channel, true, false)?;
+        // Acquire lock only to read state, release before ioctl.
+        let line_handle = {
+            let inner = self.inner();
+            let ch_info = inner.channel_to_info(channel, true, false)?;
 
-        let app_cfg = self.app_channel_configuration(ch_info);
-        if app_cfg.is_none() || ![Direction::IN, Direction::OUT].contains(&app_cfg.unwrap()) {
-            return Err(Error::msg("You must setup() the GPIO channel first"));
-        }
+            let app_cfg = inner.app_channel_configuration(ch_info);
+            if app_cfg.is_none() || ![Direction::IN, Direction::OUT].contains(&app_cfg.unwrap()) {
+                return Err(Error::msg("You must setup() the GPIO channel first"));
+            }
 
-        let line_handle = ch_info
-            .line_handle
-            .ok_or_else(|| Error::msg("GPIO line handle not found"))?;
+            ch_info
+                .line_handle
+                .ok_or_else(|| Error::msg("GPIO line handle not found"))?
+        }; // lock released here
+
         let value = get_value(line_handle)?;
 
         match value {
@@ -516,33 +539,44 @@ impl GPIO {
     /// ```rust
     /// use jetsongpio::{GPIO, Direction, Level, Mode};
     ///
-    /// let mut gpio = GPIO::new();
+    /// let gpio = GPIO::new();
     /// gpio.setmode(Mode::BOARD).unwrap();
     /// gpio.setup(vec![7], Direction::OUT, None, None).unwrap();
     /// gpio.output(vec![7], vec![Level::HIGH]).unwrap();
     /// ```
     pub fn output(&self, channels: Vec<u32>, values: Vec<Level>) -> Result<(), Error> {
-        let ch_infos = self.channels_to_infos(channels, true, false)?;
+        // Acquire lock only to read state, release before ioctl.
+        let ops: Vec<(i32, u8)> = {
+            let inner = self.inner();
+            let ch_infos = inner.channels_to_infos(channels, true, false)?;
 
-        if values.len() != ch_infos.len() {
-            return Err(Error::msg("Number of values != number of channels"));
-        }
-
-        // check that channels have been set as output
-        for ch_info in &ch_infos {
-            let app_cfg = self.app_channel_configuration(ch_info);
-            if app_cfg.is_none() || app_cfg.unwrap() != Direction::OUT {
-                return Err(Error::msg(
-                    "The GPIO channel has not been set up as an OUTPUT",
-                ));
+            if values.len() != ch_infos.len() {
+                return Err(Error::msg("Number of values != number of channels"));
             }
-        }
 
-        for (ch_info, value) in ch_infos.iter().zip(values.iter()) {
-            let line_handle = ch_info
-                .line_handle
-                .ok_or_else(|| Error::msg("GPIO line handle not found"))?;
-            set_value(line_handle, *value as u8)?;
+            for ch_info in &ch_infos {
+                let app_cfg = inner.app_channel_configuration(ch_info);
+                if app_cfg.is_none() || app_cfg.unwrap() != Direction::OUT {
+                    return Err(Error::msg(
+                        "The GPIO channel has not been set up as an OUTPUT",
+                    ));
+                }
+            }
+
+            ch_infos
+                .iter()
+                .zip(values.iter())
+                .map(|(ch_info, value)| {
+                    let line_handle = ch_info
+                        .line_handle
+                        .ok_or_else(|| Error::msg("GPIO line handle not found"))?;
+                    Ok((line_handle, *value as u8))
+                })
+                .collect::<Result<Vec<_>, Error>>()?
+        }; // lock released here
+
+        for (line_handle, value) in ops {
+            set_value(line_handle, value)?;
         }
 
         Ok(())
@@ -556,8 +590,9 @@ impl GPIO {
     ///
     /// * `channel` - The channel to check.
     pub fn gpio_function(&self, channel: u32) -> Result<Direction, Error> {
-        let ch_info = self.channel_to_info(channel, false, false)?;
-        let func = self.app_channel_configuration(ch_info);
+        let inner = self.inner();
+        let ch_info = inner.channel_to_info(channel, false, false)?;
+        let func = inner.app_channel_configuration(ch_info);
         Ok(func.unwrap_or(Direction::UNKNOWN))
     }
 }
@@ -598,14 +633,14 @@ fn pwm_export(ch_info: &mut ChannelInfo) -> Result<(), Error> {
     let pwm_dir = pwm_path(ch_info);
     if !Path::new(&pwm_dir).exists() {
         let export_path = pwm_export_path(ch_info);
-        let mut f = OpenOptions::new().write(true).open(&export_path)?;
+        let mut f = std::fs::OpenOptions::new().write(true).open(&export_path)?;
         write!(f, "{}", ch_info.pwm_id.unwrap_or(0))?;
     }
 
     // Wait for enable file to become readable (mirrors Python time.sleep loop)
     let enable_path = pwm_enable_path(ch_info);
     loop {
-        if OpenOptions::new()
+        if std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&enable_path)
@@ -617,7 +652,10 @@ fn pwm_export(ch_info: &mut ChannelInfo) -> Result<(), Error> {
     }
 
     let duty_path = pwm_duty_cycle_path(ch_info);
-    let f_duty = OpenOptions::new().read(true).write(true).open(&duty_path)?;
+    let f_duty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&duty_path)?;
     ch_info.f_duty_cycle = Some(f_duty);
 
     Ok(())
@@ -625,22 +663,21 @@ fn pwm_export(ch_info: &mut ChannelInfo) -> Result<(), Error> {
 
 fn pwm_unexport(ch_info: &ChannelInfo) -> Result<(), Error> {
     let unexport_path = pwm_unexport_path(ch_info);
-    let mut f = OpenOptions::new().write(true).open(&unexport_path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&unexport_path)?;
     write!(f, "{}", ch_info.pwm_id.unwrap_or(0))?;
     Ok(())
 }
 
 fn pwm_set_period(ch_info: &ChannelInfo, period_ns: u64) -> Result<(), Error> {
     let path = pwm_period_path(ch_info);
-    let mut f = OpenOptions::new().write(true).open(&path)?;
+    let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
     write!(f, "{}", period_ns)?;
     Ok(())
 }
 
 fn pwm_set_duty_cycle(f_duty: &mut File, duty_cycle_ns: u64) -> Result<(), Error> {
-    // On boot, both period and duty cycle are 0. When period==0, any
-    // configuration change is rejected. Only skip the write for duty_cycle==0
-    // if the current value is already 0.
     if duty_cycle_ns == 0 {
         f_duty.rewind()?;
         let mut cur = String::new();
@@ -657,14 +694,14 @@ fn pwm_set_duty_cycle(f_duty: &mut File, duty_cycle_ns: u64) -> Result<(), Error
 
 fn pwm_enable(ch_info: &ChannelInfo) -> Result<(), Error> {
     let path = pwm_enable_path(ch_info);
-    let mut f = OpenOptions::new().write(true).open(&path)?;
+    let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
     write!(f, "1")?;
     Ok(())
 }
 
 fn pwm_disable(ch_info: &ChannelInfo) -> Result<(), Error> {
     let path = pwm_enable_path(ch_info);
-    let mut f = OpenOptions::new().write(true).open(&path)?;
+    let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
     write!(f, "0")?;
     Ok(())
 }
@@ -680,9 +717,9 @@ fn pwm_disable(ch_info: &ChannelInfo) -> Result<(), Error> {
 /// ```rust
 /// use jetsongpio::{GPIO, Mode, PWM};
 ///
-/// let mut gpio = GPIO::new();
+/// let gpio = GPIO::new();
 /// gpio.setmode(Mode::BCM).unwrap();
-/// let mut pwm = PWM::new(&mut gpio, 18, 50.0).unwrap();
+/// let mut pwm = PWM::new(&gpio, 18, 50.0).unwrap();
 /// pwm.start(25.0).unwrap();
 /// // ... change duty cycle ...
 /// pwm.stop().unwrap();
@@ -705,31 +742,34 @@ impl PWM {
     /// * `gpio` - The GPIO instance (must have mode set)
     /// * `channel` - The channel number in the current pin numbering mode
     /// * `frequency_hz` - The PWM frequency in Hz
-    pub fn new(gpio: &mut GPIO, channel: u32, frequency_hz: f64) -> Result<Self, Error> {
-        gpio.validate_mode_set()?;
+    pub fn new(gpio: &GPIO, channel: u32, frequency_hz: f64) -> Result<Self, Error> {
+        // Hold the lock for the entire setup to prevent TOCTOU races.
+        let mut inner = gpio.inner();
 
-        let ch_info = gpio.channel_to_info_lookup(channel, false, true)?;
+        inner.validate_mode_set()?;
+
+        let ch_info = inner.channel_to_info_lookup(channel, false, true)?;
         let mut ch_info = ch_info.clone();
 
         // Check existing configuration
-        let app_cfg = gpio.app_channel_configuration(&ch_info);
+        let app_cfg = inner.app_channel_configuration(&ch_info);
         if app_cfg == Some(Direction::HardPwm) {
             return Err(Error::msg("Can't create duplicate PWM objects"));
         }
         // If channel is set up as GPIO, clean it up first
         if app_cfg == Some(Direction::OUT) || app_cfg == Some(Direction::IN) {
-            gpio.cleanup(Some(vec![channel]))?;
+            inner.cleanup_one(ch_info.clone());
         }
 
-        // Export the PWM
+        // Export the PWM (sysfs I/O — we hold the lock for simplicity; the
+        // export operation is fast enough that this won't cause contention
+        // issues in practice).
         pwm_export(&mut ch_info)?;
 
-        // Set initial duty cycle to 0
         if let Some(ref mut f_duty) = ch_info.f_duty_cycle {
             pwm_set_duty_cycle(f_duty, 0)?;
         }
 
-        // Anything that doesn't match new frequency_hz
         let mut pwm = PWM {
             ch_info,
             frequency_hz: -frequency_hz,
@@ -740,7 +780,8 @@ impl PWM {
         };
         pwm.reconfigure(frequency_hz, 0.0, false)?;
 
-        gpio.channel_configuration
+        inner
+            .channel_configuration
             .insert(channel, Direction::HardPwm);
 
         Ok(pwm)
@@ -774,7 +815,6 @@ impl PWM {
     /// Returns true if `cleanup()` already tore this PWM down via the parent
     /// `GPIO`. Used by `Drop` so it does not attempt to unexport twice.
     fn already_cleaned_up(&self) -> bool {
-        // After cleanup_one runs pwm_unexport, the sysfs pwmN directory is gone.
         !Path::new(&pwm_path(&self.ch_info)).exists()
     }
 
@@ -801,7 +841,6 @@ impl PWM {
         if freq_change {
             self.frequency_hz = frequency_hz;
             self.period_ns = (1_000_000_000.0 / frequency_hz) as u64;
-            // Reset duty cycle before setting period (previous duty may exceed new period)
             if let Some(ref mut f_duty) = self.ch_info.f_duty_cycle {
                 pwm_set_duty_cycle(f_duty, 0)?;
             }

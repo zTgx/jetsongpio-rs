@@ -581,8 +581,11 @@ mod tests {
     #[test]
     fn test_pad_ctl_register() {
         let reg = PadCtlRegister::from_value(0x12345678);
+        // bit 10 is set → is_gpio = (bit10 == 0) = false
         assert_eq!(reg.is_gpio, false);
-        assert_eq!(reg.is_input, false);
+        // bit 6 is set → is_input = (bit6 != 0) = true
+        assert_eq!(reg.is_input, true);
+        // bit 4 is set → is_tristate = (bit4 != 0) = true
         assert_eq!(reg.is_tristate, true);
     }
 

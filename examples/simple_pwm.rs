@@ -41,11 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
     gpio.setmode(Mode::BOARD)?;
 
     println!("Creating PWM on BOARD pin {} at 50 Hz...", board_pin);
-    let mut pwm = PWM::new(&mut gpio, board_pin, 50.0)?;
+    let mut pwm = PWM::new(&gpio, board_pin, 50.0)?;
 
     let mut val: f64 = 25.0;
     let incr: f64 = 5.0;

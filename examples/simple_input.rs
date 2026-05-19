@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_value: Option<Level> = None;
 
     // Create GPIO instance
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
 
     // Pin Setup:
     gpio.setmode(Mode::BOARD)?; // BOARD pin-numbering scheme

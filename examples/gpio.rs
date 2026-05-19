@@ -7,7 +7,7 @@ const PIN: u32 = 29;
 fn main() {
     println!("Starting GPIO test on PIN {}...", PIN);
 
-    let mut gpio = GPIO::new();
+    let gpio = GPIO::new();
     gpio.setmode(Mode::BOARD).unwrap();
 
     // Setup PIN as output with initial LOW value
