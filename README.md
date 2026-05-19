@@ -1,5 +1,10 @@
 # jetsongpio-rs
 
+[![crates.io](https://img.shields.io/crates/v/jetsongpio.svg)](https://crates.io/crates/jetsongpio)
+[![docs.rs](https://img.shields.io/docsrs/jetsongpio.svg)](https://docs.rs/jetsongpio)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![crates.io downloads](https://img.shields.io/crates/d/jetsongpio.svg)](https://crates.io/crates/jetsongpio)
+
 A Rust library for controlling GPIO pins on NVIDIA Jetson platforms.
 
 Jetson TX1, TX2, AGX Xavier, Xavier NX, Nano, AGX Orin, Orin NX, Orin Nano, and
@@ -50,7 +55,7 @@ Add the dependency to `Cargo.toml`:
 
 ```toml
 [dependencies]
-jetsongpio = "0.1"
+jetsongpio = "0.3"
 ```
 
 ### 1. Pin Numbering
@@ -60,7 +65,7 @@ The library provides two ways of numbering the I/O pins:
 ```rust
 use jetsongpio::{GPIO, Mode};
 
-let mut gpio = GPIO::new();
+let gpio = GPIO::new();
 
 // Board pin number (physical pin on the 40-pin header)
 gpio.setmode(Mode::BOARD)?;
@@ -103,7 +108,7 @@ To configure a channel as input:
 ```rust
 use jetsongpio::{GPIO, Direction, Mode};
 
-let mut gpio = GPIO::new();
+let gpio = GPIO::new();
 gpio.setmode(Mode::BOARD)?;
 gpio.setup(vec![18], Direction::IN, None, None)?;
 ```
@@ -176,7 +181,7 @@ This function blocks the calling thread until the provided edge is detected:
 use jetsongpio::{GPIO, Direction, Edge, Mode};
 use std::time::Duration;
 
-let mut gpio = GPIO::new();
+let gpio = GPIO::new();
 gpio.setmode(Mode::BOARD)?;
 gpio.setup(vec![18], Direction::IN, None, None)?;
 
@@ -243,11 +248,11 @@ Read the L4T documentation for details on how to configure the pinmux.
 ```rust
 use jetsongpio::{GPIO, Mode, PWM};
 
-let mut gpio = GPIO::new();
+let gpio = GPIO::new();
 gpio.setmode(Mode::BOARD)?;
 
 // Create PWM on pin 18 at 50 Hz
-let mut pwm = PWM::new(&mut gpio, 18, 50.0)?;
+let mut pwm = PWM::new(&gpio, 18, 50.0)?;
 
 // Start with 25% duty cycle
 pwm.start(25.0)?;
@@ -327,6 +332,30 @@ cargo run --example simple_pwm
 
 # GPIO output toggle on pin 29
 cargo run --example gpio
+
+# Multi-threaded GPIO usage (LED + button, shared Arc<GPIO>)
+cargo run --example multithread
+```
+
+## Thread Safety
+
+`GPIO` is `Send + Sync`. All mutable state is protected by an internal `Mutex`,
+so you can safely share a single instance across threads using `Arc<GPIO>`.
+The `input()` and `output()` methods release the lock before performing the
+underlying ioctl, minimizing contention between threads.
+
+```rust
+use jetsongpio::{Direction, GPIO, Level, Mode};
+use std::sync::Arc;
+
+let gpio = Arc::new(GPIO::new());
+gpio.setmode(Mode::BOARD)?;
+gpio.setup(vec![18], Direction::OUT, Some(Level::LOW), None)?;
+
+let g = Arc::clone(&gpio);
+std::thread::spawn(move || {
+    g.output(vec![18], vec![Level::HIGH]).unwrap();
+});
 ```
 
 ## Environment Variables
